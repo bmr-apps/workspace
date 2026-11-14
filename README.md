@@ -362,6 +362,37 @@ const { ok, id, from, error } = await r.json();
 
 > 함수 비밀값은 프로젝트 공용이라, 다른 앱 함수도 이론상 `WORKSPACE_MAIL_TOKEN` 을 읽을 수 있습니다. 그래도 Resend 키 자체는 암호문으로만 허브 함수가 씁니다. 학교 전체에 중요한 안내는 관리자와 상의하세요.
 
+### AI 부르기 (허브 공용 게이트웨이 `hub-ai`)
+
+Alter 의 답변은 서버 함수가 허브의 `hub-ai` 를 불러 만듭니다. **업체 키(Gemini·OpenAI·Claude·Grok)는 허브만** 갖고, 이 앱은 함수 비밀값 **`WORKSPACE_AI_TOKEN`** 으로 이 앱 신분만 증명합니다.
+
+- **모델을 정하지 않으면 허브의 기본 모델**을 씁니다. 허브 → 내 서비스 → 앱 정보 → **🤖 앱 AI** 에서 기본 모델을 바꾸면 워크스페이스에도 바로 적용됩니다 (`WORKSPACE_AI_MODEL` 을 넣었을 때만 그 값이 우선).
+- 쓸 수 있는 모델은 **허브의 허용 목록**(학교 전체 또는 이 앱) 안에서만 됩니다. 한도도 허브가 셉니다(기본: 앱마다 한 시간 60번 · 하루 500번 · 하루 50만 토큰, 학교 전체 하루 3,000번).
+- `WORKSPACE_AI_TOKEN` 이 없을 때만 `WORKSPACE_GEMINI_API_KEY` 로 **Gemini 를 직접** 부르는 예비 길을 씁니다.
+- 프롬프트·응답 본문은 저장하지 않습니다. 허브에는 모델·토큰 수·결과만 남습니다.
+
+```ts
+// supabase/functions/workspace-fn/ai.ts  (서버 함수 안에서만)
+const token = Deno.env.get('WORKSPACE_AI_TOKEN');
+const r = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/hub-ai`, {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${token}`,
+    apikey: Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    // model: 'openai:gpt-4o',       // 선택 — 없으면 허브 기본 모델
+    system: '너는 별무리학교 워크스페이스의 AI 조력자다.',
+    messages: [{ role: 'user', content: '이번 주 수업 나눔 대화를 세 줄로 정리해 줘' }],
+    max_tokens: 1200,
+  }),
+});
+const { ok, provider, model, text, usage, error } = await r.json();
+```
+
+지금 어느 길로 부르는지는 `/health` 의 `ai_hub`(토큰 있음) · `ai_ready`(부를 수 있음) · `ai_via`(`hub`/`gemini`/`none`)와 **🛠️ 관리 → 🔑 연동·시스템** 의 **AI 연결** 카드(허브 공용 / Gemini 직접, 마지막 답의 모델)에서 볼 수 있습니다. 토큰은 **🤖 앱 AI → AI 토큰 발급** 한 번이면 들어가고, 새 앱은 승인 때 자동 발급됩니다.
+
 ## 9. 관리자에게 요청할 것
 
 
@@ -497,7 +528,7 @@ curl -s https://psupfmarnyxontorftio.supabase.co/functions/v1/workspace-fn/bot/c
 
 | 방식 | 주소 | 하는 일 |
 |---|---|---|
-| REST | `GET /admin/overview` | 멤버·초대·채널·메시지·푸시 구독·열쇠 수, AI 모델·열쇠 상태·마지막 AI 응답, 푸시 가능 여부, `mail_ready`(초대 메일 토큰 준비 여부) |
+| REST | `GET /admin/overview` | 멤버·초대·채널·메시지·푸시 구독·열쇠 수, AI 경로(`ai.via` = `hub`·`gemini`·`none`)·모델·마지막 AI 응답, 푸시 가능 여부, `mail_ready`(초대 메일 토큰 준비 여부) |
 
 - 값은 숫자·상태만 나갑니다. **열쇠 원문·비밀값은 어떤 경우에도 화면으로 나가지 않습니다.**
 - 미리보기 모드에서도 탭 3개·공지 고정·메시지 삭제를 모두 연습할 수 있습니다(가짜 데이터, 새로 고치면 처음 상태).

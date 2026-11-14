@@ -1,8 +1,8 @@
 // workspace-fn — 별무리 워크스페이스 서버 함수
 //
 // 주소: https://psupfmarnyxontorftio.supabase.co/functions/v1/workspace-fn/<경로>
-//   GET  /health                                  DB·표 연결 확인 · 메일 토큰 준비 여부(mail_ready)
-//   GET  /hello                                   부른 사람, AI 열쇠 설정 여부
+//   GET  /health                                  DB·표 연결 확인 · 메일 토큰 준비 여부(mail_ready) · AI 경로(ai_hub·ai_via)
+//   GET  /hello                                   부른 사람, AI 열쇠 설정 여부(ai_hub·ai_ready)
 //   GET  /bootstrap                               나·멤버·채널 목록 (기본 채널과 내 AI 방을 만들어 줌)
 //   POST /channels      {kind:'channel', name, description} | {kind:'dm', target_user_id}
 //   GET  /messages?channel_id=…[&parent_id=…]     채널 메시지 / 스레드 답글 (attachments 포함) + 채널(공지 고정)
@@ -26,12 +26,13 @@
 //
 // 함수는 이 앱 전용 DB 계정(workspace_fn, 개발자 계정 권한을 물려받음)으로 접속해 RLS 를 거치지 않습니다.
 // 그래서 누가 무엇을 볼 수 있는지는 이 파일에서 직접 확인합니다 (memberFor / channelFor).
-// 비밀값: WORKSPACE_DB_URL, WORKSPACE_GEMINI_API_KEY, WORKSPACE_GEMINI_MODEL(선택)
+// 비밀값: WORKSPACE_DB_URL, WORKSPACE_AI_TOKEN(허브 hub-ai 신분증 · 권장), WORKSPACE_AI_MODEL(선택),
+//        WORKSPACE_GEMINI_API_KEY(AI 토큰이 없을 때만 쓰는 예비 길), WORKSPACE_GEMINI_MODEL(선택)
 import postgres from 'npm:postgres@3.4.5';
 import { HttpError } from './http.ts';
 import { adminRoute } from './admin.ts';
 import { DDL, SEED_CHANNELS, CHECK_TABLES } from './schema.ts';
-import { ask, hasKey as aiHasKey, currentModel, lastAiResult, type Turn } from './ai.ts';
+import { ask, hasKey as aiHasKey, hasHub as aiHasHub, aiVia, currentModel, lastAiResult, type Turn } from './ai.ts';
 import { getVapid, pushAvailable, sendPush } from './push.ts';
 import {
   botApi, mcpApi, requireBotToken, listBotTokens, createBotToken, revokeBotToken, BotError,
@@ -492,7 +493,7 @@ async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, ch
       values (${channelId}, ${aiParent}, ${null}, ${'Alter'}, ${'ai'}, ${res.text}) returning *`;
     const ai = asMessage(aiRow);
     bg(notifyPush(sql, ch, ai));
-    return { message, ai: { ...ai, source: res.source, model: res.source === 'gemini' ? (res.model ?? currentModel()) : null } };
+    return { message, ai: { ...ai, source: res.source, model: res.source === 'hub' || res.source === 'gemini' ? (res.model ?? currentModel()) : null } };
   } catch (e) {
     console.error(FN, 'ai insert', (e as Error)?.message ?? e);
     return { message, ai: null, ai_error: 'Alter 의 답글을 저장하지 못했어요.' };
@@ -546,7 +547,10 @@ Deno.serve(async (req) => {
         bot = { tokens: Number(r?.n ?? 0), env_token: Boolean(secret('BOT_TOKEN')) };
       } catch { bot = null; }
       return json(req, 200, {
-        ok: true, db: true, schema, ...(counts || {}), ai_last: lastAiResult(), push: pushAvailable(),
+        ok: true, db: true, schema, ...(counts || {}),
+        // AI — ai_hub: 허브 공용 게이트웨이(hub-ai)를 WORKSPACE_AI_TOKEN 으로 부르는가 · ai_ready: AI 를 부를 수 있는가
+        ai_hub: aiHasHub(), ai_ready: aiHasKey(), ai_via: aiVia(), ai_model: currentModel(), ai_last: lastAiResult(),
+        push: pushAvailable(),
         mail_ready: Boolean(secret('MAIL_TOKEN')), mcp: true, bot_api: true, bot, function: FN,
       });
     }
@@ -555,7 +559,8 @@ Deno.serve(async (req) => {
     if (path === '/hello') {
       return json(req, 200, {
         app: SCHEMA, user: user ? { id: user.id, email: user.email, name: user.name } : null,
-        db: Boolean(sql), gemini_key_set: aiHasKey(), gemini_model: currentModel(), time: new Date().toISOString(),
+        db: Boolean(sql), ai_hub: aiHasHub(), ai_ready: aiHasKey(), ai_via: aiVia(),
+        gemini_key_set: aiHasKey(), gemini_model: currentModel(), time: new Date().toISOString(),
       });
     }
     if (!sql) return json(req, 503, { error: '서버 설정이 아직 끝나지 않았습니다 (DB 연결 정보 없음).' });
@@ -674,7 +679,7 @@ Deno.serve(async (req) => {
         me,
         members: (memberRows as Record<string, unknown>[]).map(asMember),
         channels: await attachPins(sql, (channelRows as Record<string, unknown>[]).map(asChannel)),
-        gemini_key_set: aiHasKey(),
+        gemini_key_set: aiHasKey(), ai_ready: aiHasKey(), ai_hub: aiHasHub(), ai_via: aiVia(),
       });
     }
 

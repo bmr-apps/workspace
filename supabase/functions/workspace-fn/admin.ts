@@ -21,7 +21,7 @@
 //     화면(브라우저)이 내가 올린 파일만 함께 지웁니다(app.js 의 removeUploaded).
 import type postgres from 'npm:postgres@3.4.5';
 import { HttpError } from './http.ts';
-import { hasKey as aiHasKey, currentModel, lastAiResult } from './ai.ts';
+import { hasKey as aiHasKey, hasHub as aiHasHub, aiVia, currentModel, lastAiResult } from './ai.ts';
 import { pushAvailable } from './push.ts';
 import { sendMail, inviteMail, mailReady, MAIL_FROM, MAIL_FROM_NAME } from './mail.ts';
 
@@ -162,7 +162,8 @@ export async function adminRoute(sql: Sql, req: Request, path: string, me: Admin
           messages: Number(r.messages ?? 0), push_subs: Number(r.push_subs ?? 0), bot_tokens: Number(r.bot_tokens ?? 0),
         },
         last_message_at: iso(r.last_message_at),
-        ai: { key_set: aiHasKey(), model: currentModel(), last: lastAiResult() },
+        // AI — via: 'hub'(허브 hub-ai · WORKSPACE_AI_TOKEN) | 'gemini'(직접 호출) | 'none'
+        ai: { via: aiVia(), hub: aiHasHub(), key_set: aiHasKey(), model: currentModel(), last: lastAiResult() },
         push: pushAvailable(),
         mail_ready: mailReady(),
         mail: { ready: mailReady(), from: MAIL_FROM },
