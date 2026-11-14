@@ -73,4 +73,17 @@ export const liveApi = {
     }
     return () => { if (ch) { try { supabase.removeChannel(ch); } catch { /* 무시 */ } } };
   },
+
+  // ---------- 알림(Web Push) ----------
+  pushKey: () => call('/push/key'),
+
+  pushSubscribe: (subscription) => call('/push/subscribe', {
+    method: 'POST',
+    body: { subscription },
+  }),
+
+  pushUnsubscribe: (endpoint) => call('/push/unsubscribe', {
+    method: 'POST',
+    body: { endpoint },
+  }),
 };

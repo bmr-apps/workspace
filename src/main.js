@@ -14,6 +14,7 @@ const fullFmt = new Intl.DateTimeFormat('ko-KR', { timeZone: TZ, dateStyle: 'med
 const dayFmt = new Intl.DateTimeFormat('ko-KR', { timeZone: TZ, year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
 const keyFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
 const PALETTE = ['#ffdc1a', '#0abbee', '#02c245', '#ff614a', '#7e65c1', '#b0e7f8', '#fef1b8', '#a4e9bc'];
+const BASE_PATH = import.meta.env.BASE_URL;
 
 const S = {
   mode: null,          // 'live' | 'preview'
@@ -32,6 +33,8 @@ const S = {
   starting: false,
   aiKeySet: true,
   hasSession: false,
+  unread: 0,
+  baseTitle: '별무리 워크스페이스 · BMR APPS',
   unsub: null,
   poll: null,
   reloadTimer: null,
@@ -79,6 +82,20 @@ function showChatError(msg) {
   const e = $('chat-error');
   e.textContent = msg || '';
   e.hidden = !msg;
+}
+
+// ---------- 제목 배지(안 읽은 메시지) ----------
+function setTitle() {
+  document.title = S.unread > 0 ? `(${S.unread}) 별무리 워크스페이스` : S.baseTitle;
+}
+function addUnread(n = 1) {
+  if (!n) return;
+  S.unread += n;
+  setTitle();
+}
+function incoming(msg) {
+  if (!msg || (S.me && msg.user_id === S.me.id)) return;
+  if (document.visibilityState === 'hidden' || (typeof msg.channel_id === 'number' && msg.channel_id !== S.channelId)) addUnread(1);
 }
 const currentChannel = () => S.channels.find((c) => c.id === S.channelId) || null;
 
@@ -498,6 +515,7 @@ function showLogin(msg = '', isErr = false) {
   $('logout').hidden = true;
   $('conn').hidden = true;
   $('open-sidebar').hidden = true;
+  $('bell').hidden = true;
   $('login-logout').hidden = !S.hasSession;
 }
 
@@ -537,6 +555,8 @@ function enter(data, mode) {
   $('workspace').hidden = false;
   $('logout').hidden = false;
   $('open-sidebar').hidden = false;
+  $('bell').hidden = mode !== 'live';
+  if (mode === 'live') refreshBell();
   $('logout').textContent = mode === 'preview' ? '미리보기 끝내기' : '로그아웃';
   $('conn').hidden = false;
   $('conn').classList.toggle('preview', mode === 'preview');
@@ -552,7 +572,8 @@ function enter(data, mode) {
   else renderHeader();
 
   if (mode === 'live') {
-    S.unsub = S.api.subscribe(() => {
+    S.unsub = S.api.subscribe((msg) => {
+      incoming(msg);
       clearTimeout(S.reloadTimer);
       S.reloadTimer = setTimeout(() => { reload(); }, 350);
     });
@@ -560,6 +581,8 @@ function enter(data, mode) {
       if (document.visibilityState === 'visible') reload();
     }, 5000);
   }
+  S.unread = 0;
+  setTitle();
 }
 
 async function startLive() {
@@ -605,6 +628,94 @@ function exitPreview() {
   showLogin();
 }
 
+// ---------- 서비스 워커 · 알림 ----------
+let swReg = null;
+async function registerSw() {
+  if (!('serviceWorker' in navigator)) return null;
+  try {
+    swReg = await navigator.serviceWorker.register(BASE_PATH + 'sw.js', { scope: '/workspace/' });
+    return swReg;
+  } catch (e) {
+    console.warn('서비스 워커를 등록하지 못했습니다.', e);
+    return null;
+  }
+}
+
+function urlB64ToUint8Array(base64) {
+  const padded = (base64 + '='.repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(padded);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function pushSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+async function currentPushSub() {
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    return reg ? await reg.pushManager.getSubscription() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshBell() {
+  const b = $('bell');
+  if (!b) return;
+  if (S.mode !== 'live' || !pushSupported()) { b.hidden = true; return; }
+  b.hidden = false;
+  const perm = Notification.permission;
+  const sub = await currentPushSub();
+  b.classList.toggle('on', Boolean(sub));
+  b.setAttribute('aria-pressed', sub ? 'true' : 'false');
+  if (perm === 'denied') {
+    b.textContent = '🔕 알림 차단됨';
+    b.title = '브라우저 설정에서 이 사이트의 알림을 허용해 주세요';
+  } else if (sub) {
+    b.textContent = '🔔 알림 켬';
+    b.title = '새 메시지가 오면 알려 드려요. 누르면 끕니다.';
+  } else {
+    b.textContent = '🔔 알림';
+    b.title = '앱을 닫아도 새 메시지를 알려 드려요. 눌러서 켜세요.';
+  }
+}
+
+async function toggleBell() {
+  if (S.mode !== 'live') { toast('미리보기에서는 실제 알림을 켤 수 없어요.'); return; }
+  if (!pushSupported()) { toast('이 브라우저는 알림을 지원하지 않아요.', 'err'); return; }
+  const b = $('bell');
+  b.disabled = true;
+  try {
+    const reg = (await navigator.serviceWorker.getRegistration()) || (await registerSw());
+    if (!reg) throw new Error('서비스 워커를 준비하지 못했어요. 페이지를 새로 고쳐 보세요.');
+    const existing = await reg.pushManager.getSubscription();
+    if (existing) {
+      try { await S.api.pushUnsubscribe(existing.endpoint); } catch { /* 서버에 없어도 아래에서 끈다 */ }
+      await existing.unsubscribe();
+      toast('알림을 껐어요.');
+    } else {
+      const perm = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();
+      if (perm !== 'granted') {
+        toast(perm === 'denied' ? '브라우저 설정에서 알림을 허용해 주세요.' : '알림을 켜려면 권한이 필요해요.', 'err');
+        return;
+      }
+      const { publicKey } = await S.api.pushKey();
+      if (!publicKey) throw new Error('서버에 알림 열쇠가 아직 없어요. 잠시 뒤 다시 시도해 주세요.');
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(publicKey) });
+      await S.api.pushSubscribe(sub.toJSON());
+      toast('알림을 켰어요. 앱을 닫아도 새 메시지를 알려 드려요.');
+    }
+  } catch (e) {
+    toast(e.message || '알림 설정에 실패했어요.', 'err');
+  } finally {
+    b.disabled = false;
+    refreshBell();
+  }
+}
+
 // ---------- 사이드바(모바일) ----------
 function openSidebar() {
   $('sidebar').classList.add('open');
@@ -628,6 +739,14 @@ function bind() {
     }
   });
   $('preview-login').addEventListener('click', () => startPreview());
+  $('bell').addEventListener('click', toggleBell);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    S.unread = 0;
+    setTitle();
+    if (S.mode === 'live') { reload(); refreshBell(); }
+  });
 
   $('login-logout').addEventListener('click', async () => {
     try { await logout(); } catch { /* 무시 */ }
@@ -727,8 +846,12 @@ function authRedirectError() {
 
 // ---------- 시작 ----------
 async function boot() {
-  applyAppInfo(' · BMR APPS');
+  applyAppInfo(' · BMR APPS').then(() => {
+    S.baseTitle = document.title || S.baseTitle;
+    setTitle();
+  }).catch(() => { /* 허브 이름을 못 읽어도 그대로 */ });
   bind();
+  registerSw();
   const err = authRedirectError();
   if (err) showLogin(err, true);
   let user = null;

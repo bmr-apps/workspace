@@ -14,6 +14,7 @@
 import postgres from 'npm:postgres@3.4.5';
 import { DDL, SEED_CHANNELS, CHECK_TABLES } from './schema.ts';
 import { ask, hasKey as aiHasKey, currentModel, lastAiResult, type Turn } from './ai.ts';
+import { getVapid, pushAvailable, sendPush } from './push.ts';
 
 const FN = 'workspace-fn';
 const SCHEMA = 'workspace';
@@ -82,9 +83,9 @@ function ensureSchema(sql: Sql): Promise<void> {
       const t0 = Date.now();
       let fresh = false;
       try {
-        const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean }[];
+        const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean }[];
         const t = rows?.[0] ?? {};
-        fresh = !(t.members && t.channels && t.messages);
+        fresh = !(t.members && t.channels && t.messages && t.push && t.push_config);
       } catch (e) {
         fresh = true;
         console.error(FN, 'check tables', (e as Error)?.message ?? e);
@@ -98,9 +99,9 @@ function ensureSchema(sql: Sql): Promise<void> {
       }
       try { await sql.unsafe(SEED_CHANNELS); } catch (e) { console.error(FN, 'seed', (e as Error)?.message ?? e); }
       // 마지막 확인: 핵심 표가 정말 있는지 (하나라도 없으면 이번 요청은 실패로 알린다)
-      const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean }[];
+      const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean }[];
       const t = rows?.[0] ?? {};
-      if (!(t.members && t.channels && t.messages)) throw new Error('표를 만들지 못했습니다');
+      if (!(t.members && t.channels && t.messages && t.push && t.push_config)) throw new Error('표를 만들지 못했습니다');
       console.log(FN, 'schema ready', Date.now() - t0, 'ms', fresh ? '(created)' : '(existing)');
     })().catch((e) => {
       schemaReady = null; // 다음 요청에서 다시 시도
@@ -245,6 +246,44 @@ async function contextTurns(sql: Sql, channelId: number, parentId: number | null
 const MAX_CONTENT = 4000;
 const mentionRe = /@\s?(ai|alter)\b/i;
 
+// ---------- 알림 보내기 (응답을 막지 않게 백그라운드로) ----------
+const bg = (p: Promise<unknown>) => {
+  const er = (globalThis as { EdgeRuntime?: { waitUntil?: (q: Promise<unknown>) => void } }).EdgeRuntime;
+  if (er?.waitUntil) { try { er.waitUntil(p); return; } catch { /* 아래로 */ } }
+  p.catch(() => { /* notifyPush 안에서 이미 기록 */ });
+};
+
+async function notifyPush(sql: Sql, ch: Record<string, unknown>, m: Message) {
+  if (!pushAvailable()) return;
+  const cid = m.channel_id;
+  const kind = String(ch.kind ?? 'channel');
+  try {
+    // 받는 사람: 보낸 사람을 뺀 구독자. 공개 채널은 구독한 모든 멤버, DM·AI 방은 그 채널의 멤버만.
+    const rows = kind === 'channel'
+      ? (m.user_id
+        ? await sql`select endpoint, p256dh, auth from ${sql(SCHEMA)}.push_subscriptions where user_id <> ${m.user_id} limit 50`
+        : await sql`select endpoint, p256dh, auth from ${sql(SCHEMA)}.push_subscriptions limit 50`)
+      : (m.user_id
+        ? await sql`select ps.endpoint, ps.p256dh, ps.auth from ${sql(SCHEMA)}.push_subscriptions ps
+            join ${sql(SCHEMA)}.channel_members cm on cm.user_id = ps.user_id and cm.channel_id = ${cid}
+            where ps.user_id <> ${m.user_id} limit 50`
+        : await sql`select ps.endpoint, ps.p256dh, ps.auth from ${sql(SCHEMA)}.push_subscriptions ps
+            join ${sql(SCHEMA)}.channel_members cm on cm.user_id = ps.user_id and cm.channel_id = ${cid} limit 50`);
+    const subs = (rows as Record<string, unknown>[]).map((r) => ({
+      endpoint: String(r.endpoint), p256dh: String(r.p256dh), auth: String(r.auth),
+    }));
+    if (!subs.length) return;
+    const title = kind === 'channel'
+      ? `#${String(ch.name)} · ${m.author_name}`
+      : (kind === 'ai' ? 'Alter' : `${m.author_name} · DM`);
+    const body = m.content.replace(/\s+/g, ' ').slice(0, 160);
+    const out = await sendPush(sql, subs, { title, body, tag: `workspace-${cid}`, url: '/workspace/' });
+    console.log(FN, 'push', kind, cid, JSON.stringify(out));
+  } catch (e) {
+    console.error(FN, 'push', (e as Error)?.message ?? e);
+  }
+}
+
 async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, channelId: number, raw: string, parentId: number | null) {
   const content = String(raw ?? '').replace(/\r\n/g, '\n').trim();
   if (!content) throw new HttpError(400, '메시지 내용을 적어 주세요.', 'empty');
@@ -261,6 +300,7 @@ async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, ch
   const [row] = await sql`insert into ${sql(SCHEMA)}.messages (channel_id, parent_id, user_id, author_name, author_kind, content)
     values (${channelId}, ${threadRoot}, ${me.id}, ${me.name || '선생님'}, ${'user'}, ${content}) returning *`;
   const message = asMessage(row);
+  bg(notifyPush(sql, ch, message));
 
   const kind = String(ch.kind ?? 'channel');
   const wantsAi = kind === 'ai' || mentionRe.test(content);
@@ -274,7 +314,9 @@ async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, ch
   try {
     const [aiRow] = await sql`insert into ${sql(SCHEMA)}.messages (channel_id, parent_id, user_id, author_name, author_kind, content)
       values (${channelId}, ${aiParent}, ${null}, ${'Alter'}, ${'ai'}, ${res.text}) returning *`;
-    return { message, ai: { ...asMessage(aiRow), source: res.source, model: res.source === 'gemini' ? (res.model ?? currentModel()) : null } };
+    const ai = asMessage(aiRow);
+    bg(notifyPush(sql, ch, ai));
+    return { message, ai: { ...ai, source: res.source, model: res.source === 'gemini' ? (res.model ?? currentModel()) : null } };
   } catch (e) {
     console.error(FN, 'ai insert', (e as Error)?.message ?? e);
     return { message, ai: null, ai_error: 'Alter 의 답글을 저장하지 못했어요.' };
@@ -304,13 +346,14 @@ Deno.serve(async (req) => {
         const rows = await sql.unsafe(`select
           (select count(*)::int from workspace.channels) as channels,
           (select count(*)::int from workspace.members) as members,
-          (select count(*)::int from workspace.messages) as messages`) as unknown as { channels: number; members: number; messages: number }[];
+          (select count(*)::int from workspace.messages) as messages,
+          (select count(*)::int from workspace.push_subscriptions) as push_subs`) as unknown as { channels: number; members: number; messages: number; push_subs: number }[];
         counts = rows?.[0] ?? null;
         schema = true;
       } catch (e) {
         console.error(FN, 'schema', (e as Error)?.message ?? e);
       }
-      return json(req, 200, { ok: true, db: true, schema, ...(counts || {}), ai_last: lastAiResult(), function: FN });
+      return json(req, 200, { ok: true, db: true, schema, ...(counts || {}), ai_last: lastAiResult(), push: pushAvailable(), function: FN });
     }
 
     const user = await getUser(req);
@@ -342,6 +385,45 @@ Deno.serve(async (req) => {
         channels: (channelRows as Record<string, unknown>[]).map(asChannel),
         gemini_key_set: aiHasKey(),
       });
+    }
+
+    if (path === '/push/key' && req.method === 'GET') {
+      try {
+        const v = await getVapid(sql);
+        return json(req, 200, { publicKey: v.publicKey, subject: v.subject, available: pushAvailable() });
+      } catch (e) {
+        console.error(FN, 'vapid', (e as Error)?.message ?? e);
+        return json(req, 500, { error: '알림 열쇠를 준비하지 못했어요. 잠시 뒤 다시 시도해 주세요.' });
+      }
+    }
+
+    if (path === '/push/subscribe' && req.method === 'POST') {
+      const raw = await req.text();
+      if (raw.length > 8192) return json(req, 413, { error: '요청이 너무 큽니다.' });
+      let b: { subscription?: { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } } };
+      try { b = JSON.parse(raw || '{}'); } catch { return json(req, 400, { error: 'JSON 형식이 아닙니다.' }); }
+      const sub = b.subscription ?? {};
+      const endpoint = String(sub.endpoint ?? '');
+      const p256dh = String(sub.keys?.p256dh ?? '');
+      const auth = String(sub.keys?.auth ?? '');
+      if (!/^https:\/\//.test(endpoint) || endpoint.length > 1000 || !p256dh || p256dh.length > 200 || !auth || auth.length > 100) {
+        return json(req, 400, { error: '알림 구독 정보가 올바르지 않습니다.' });
+      }
+      await sql`insert into ${sql(SCHEMA)}.push_subscriptions (user_id, endpoint, p256dh, auth)
+        values (${me.id}, ${endpoint}, ${p256dh}, ${auth})
+        on conflict (endpoint) do update set user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth, created_at = now()`;
+      return json(req, 201, { ok: true });
+    }
+
+    if (path === '/push/unsubscribe' && req.method === 'POST') {
+      const raw = await req.text();
+      if (raw.length > 4096) return json(req, 413, { error: '요청이 너무 큽니다.' });
+      let b: { endpoint?: unknown };
+      try { b = JSON.parse(raw || '{}'); } catch { return json(req, 400, { error: 'JSON 형식이 아닙니다.' }); }
+      const endpoint = String(b.endpoint ?? '');
+      if (!endpoint) return json(req, 400, { error: 'endpoint 가 필요합니다.' });
+      await sql`delete from ${sql(SCHEMA)}.push_subscriptions where endpoint = ${endpoint} and user_id = ${me.id}`;
+      return json(req, 200, { ok: true });
     }
 
     if (path === '/channels' && req.method === 'POST') {

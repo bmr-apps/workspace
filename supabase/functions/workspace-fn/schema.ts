@@ -90,6 +90,25 @@ export const DDL: string[] = [
   `grant usage on schema workspace to authenticated, anon`,
   `grant select on workspace.members, workspace.channels, workspace.channel_members, workspace.messages to authenticated`,
 
+  // ---------- 알림(Web Push) — 브라우저는 읽지도 쓰지도 않고, 함수만 다룬다 ----------
+  `create table if not exists workspace.push_subscriptions (
+    id bigint generated always as identity primary key,
+    user_id uuid not null,
+    endpoint text unique not null,
+    p256dh text not null,
+    auth text not null,
+    created_at timestamptz not null default now()
+  )`,
+  `create index if not exists push_subscriptions_user_idx on workspace.push_subscriptions (user_id)`,
+  `create table if not exists workspace.push_config (
+    id int primary key default 1,
+    public_key text not null,
+    private_jwk jsonb not null,
+    subject text not null
+  )`,
+  `alter table workspace.push_subscriptions enable row level security`,
+  `alter table workspace.push_config enable row level security`,
+
   // 실시간 구독용 (프로젝트 설정에 따라 권한이 없을 수 있음 — 실패해도 앱은 폴링으로 동작)
   `do $$ begin
      alter publication supabase_realtime add table workspace.messages;
@@ -108,6 +127,8 @@ on conflict (slug) do nothing`;
 
 /** 빠른 확인: 핵심 표가 이미 있는지 (있으면 DDL 을 건너뛴다) */
 export const CHECK_TABLES = `select
-  to_regclass('workspace.members')  is not null as members,
-  to_regclass('workspace.channels') is not null as channels,
-  to_regclass('workspace.messages') is not null as messages`;
+  to_regclass('workspace.members')            is not null as members,
+  to_regclass('workspace.channels')           is not null as channels,
+  to_regclass('workspace.messages')           is not null as messages,
+  to_regclass('workspace.push_subscriptions') is not null as push,
+  to_regclass('workspace.push_config')        is not null as push_config`;
