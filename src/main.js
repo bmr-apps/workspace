@@ -1041,7 +1041,17 @@ function renderAdminMembers() {
   const box = $('admin-member-list');
   if (!box) return;
   box.textContent = '';
-  const list = (S.adminMembers.length ? S.adminMembers : S.members.map((m) => ({ ...m, id: m.id })));
+  const list = (S.adminMembers.length ? S.adminMembers : S.members.map((m) => ({ ...m, id: m.id })))
+    // 서버와 같은 순서: 관리자 먼저, 차단된 사람은 맨 아래
+    .slice().sort((a, b) => {
+      const da = a.disabled_at ? 1 : 0;
+      const db = b.disabled_at ? 1 : 0;
+      if (da !== db) return da - db;
+      const ra = a.role === 'admin' ? 0 : 1;
+      const rb = b.role === 'admin' ? 0 : 1;
+      if (ra !== rb) return ra - rb;
+      return String(a.name || a.email).localeCompare(String(b.name || b.email), 'ko');
+    });
   if (!list.length) {
     box.appendChild(el('p', 'token-empty', '아직 멤버가 없어요.'));
     return;
@@ -1053,9 +1063,10 @@ function renderAdminMembers() {
     av.style.background = m.avatar_color || PALETTE[0];
     row.appendChild(av);
     const main = el('div', 'admin-row-main');
-    main.appendChild(el('b', 'admin-row-name', (m.name || m.email) + (mine ? ' (나)' : '')));
+    main.appendChild(el('b', 'admin-row-name', m.name || m.email));
     main.appendChild(el('span', 'admin-row-sub', m.email));
     const tags = el('div', 'admin-row-tags');
+    if (mine) tags.appendChild(tag('나', 'quiet'));
     tags.appendChild(tag(m.role === 'admin' ? '관리자' : '멤버', m.role === 'admin' ? 'admin' : ''));
     tags.appendChild(tag(m.disabled_at ? '차단됨' : '활성', m.disabled_at ? 'bad' : 'ok'));
     if (m.last_seen_at) tags.appendChild(tag(`최근 ${fmtWhen(m.last_seen_at)}`, 'quiet'));
