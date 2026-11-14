@@ -97,6 +97,10 @@ function ensureSchema(sql: Sql): Promise<void> {
         }
       }
       try { await sql.unsafe(SEED_CHANNELS); } catch (e) { console.error(FN, 'seed', (e as Error)?.message ?? e); }
+      // 마지막 확인: 핵심 표가 정말 있는지 (하나라도 없으면 이번 요청은 실패로 알린다)
+      const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean }[];
+      const t = rows?.[0] ?? {};
+      if (!(t.members && t.channels && t.messages)) throw new Error('표를 만들지 못했습니다');
       console.log(FN, 'schema ready', Date.now() - t0, 'ms', fresh ? '(created)' : '(existing)');
     })().catch((e) => {
       schemaReady = null; // 다음 요청에서 다시 시도
@@ -294,8 +298,19 @@ Deno.serve(async (req) => {
       if (!sql) return json(req, 503, { ok: false, db: false });
       await sql`select 1`;
       let schema = false;
-      try { await ensureSchema(sql); schema = true; } catch (e) { console.error(FN, 'schema', (e as Error)?.message ?? e); }
-      return json(req, 200, { ok: true, db: true, schema, function: FN });
+      let counts: { channels?: number; members?: number; messages?: number } | null = null;
+      try {
+        await ensureSchema(sql);
+        const rows = await sql.unsafe(`select
+          (select count(*)::int from workspace.channels) as channels,
+          (select count(*)::int from workspace.members) as members,
+          (select count(*)::int from workspace.messages) as messages`) as unknown as { channels: number; members: number; messages: number }[];
+        counts = rows?.[0] ?? null;
+        schema = true;
+      } catch (e) {
+        console.error(FN, 'schema', (e as Error)?.message ?? e);
+      }
+      return json(req, 200, { ok: true, db: true, schema, ...(counts || {}), function: FN });
     }
 
     const user = await getUser(req);
