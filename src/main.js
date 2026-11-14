@@ -838,7 +838,9 @@ async function loadTokens() {
     const res = await S.api.botTokens();
     S.tokens = res.tokens || [];
     renderTokens();
-    setLinkNote(res.env_token ? '서버 비밀값(WORKSPACE_BOT_TOKEN)으로 넣은 열쇠도 함께 쓰이고 있어요.' : '');
+    if (res.env_token) setLinkNote('서버 비밀값(WORKSPACE_BOT_TOKEN)으로 넣은 열쇠도 함께 쓰이고 있어요.');
+    else if (S.mode === 'preview') setLinkNote('미리보기예요 — 진짜 열쇠는 만들어지지 않고 어디에도 저장되지 않습니다.');
+    else setLinkNote('');
   } catch (e) {
     setLinkNote(e.message || '열쇠 목록을 불러오지 못했어요.', true);
   }
