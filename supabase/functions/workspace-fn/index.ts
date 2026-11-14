@@ -568,7 +568,10 @@ Deno.serve(async (req) => {
       if (!auth.ok) {
         const message = '봇 열쇠가 필요합니다. Authorization: Bearer bmrws_… (또는 x-bot-token) 헤더를 붙여 주세요.';
         if (path === '/mcp') {
-          return jsonOpen(401, { jsonrpc: '2.0', id: null, error: { code: -32001, message } }, { 'WWW-Authenticate': 'Bearer' });
+          return jsonOpen(401, { jsonrpc: '2.0', id: null, error: { code: -32001, message } }, {
+            'WWW-Authenticate': 'Bearer',
+            'Mcp-Session-Id': (req.headers.get('mcp-session-id') ?? '').trim() || 'bmrws-stateless-1',
+          });
         }
         return jsonOpen(401, { error: message, code: 'bot_unauthorized' });
       }
@@ -577,6 +580,13 @@ Deno.serve(async (req) => {
         const r: Reply = path === '/mcp'
           ? await mcpApi(sql, req, notifyBot, OPEN_HEADERS)
           : await botApi(sql, req, path, notifyBot);
+        // GET /mcp 의 SSE 처럼 본문을 스트림으로 흘려보내는 응답
+        if (r.stream) {
+          return new Response(r.stream, {
+            status: r.status,
+            headers: { ...OPEN_HEADERS, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...(r.headers ?? {}) },
+          });
+        }
         return jsonOpen(r.status, r.body, r.headers ?? {});
       } catch (e) {
         if (e instanceof BotError) return jsonOpen(e.status, { error: e.message, code: 'bot_error' });

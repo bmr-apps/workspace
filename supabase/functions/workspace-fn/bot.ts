@@ -8,8 +8,11 @@
 //   POST   /bot/messages                         메시지·답글 쓰기 (+ Web Push 알림)
 //   GET    /bot/search?q=&limit=                 채널 메시지 검색
 //   POST   /mcp                                  MCP JSON-RPC 2.0 (initialize·tools/list·tools/call)
-//   GET    /mcp                                  서버가 먼저 보내는 스트림은 없음 → 405
+//   GET    /mcp                                  SSE 스트림 자리 — 보낼 말은 없어 첫 주석만 보내고 닫는다
 //   DELETE /mcp                                  세션 정리(무상태라 그냥 204)
+//
+// 세션은 두지 않지만, 세션 아이디를 꼭 받아야 하는 엄격한 클라이언트(Grok 원격 커넥터 등)를 위해
+// 모든 응답에 `Mcp-Session-Id` 를 되돌려주고, GET 은 405 대신 200 text/event-stream 으로 연다.
 //
 // 열쇠는 `Authorization: Bearer bmrws_…` 또는 `x-bot-token: bmrws_…` 로 옵니다.
 // workspace.bot_tokens 에는 SHA-256 해시만 있고, 맞으면 last_used_at 을 1분에 한 번만 고칩니다.
@@ -21,7 +24,11 @@ type Sql = ReturnType<typeof postgres>;
 const API = '/bot';
 
 // ---------- 바깥으로 돌려줄 모양 ----------
-export type Reply = { status: number; body: unknown; headers?: Record<string, string> };
+export type Reply = {
+  status: number; body: unknown; headers?: Record<string, string>;
+  /** 본문을 JSON 이 아니라 스트림으로 그대로 흘려보낼 때 (MCP GET 의 SSE) */
+  stream?: ReadableStream<Uint8Array>;
+};
 /** 글을 남겼을 때 알림을 보내는 함수 (index.ts 가 Web Push 로 넘긴다) */
 export type Notify = (channel: Record<string, unknown>, message: BotMessage) => void;
 
@@ -496,8 +503,9 @@ async function handleRpc(sql: Sql, notify: Notify, rpc: Rpc): Promise<Record<str
 
   switch (method) {
     case 'initialize': {
-      const asked = String(params.protocolVersion ?? '');
-      const version = PROTOCOLS.includes(asked) ? asked : PROTOCOLS[1];
+      // 모르는 판이 와도 우리가 아는 가장 새 판으로 답한다 (엄격한 클라이언트는 여기서 판을 맞춘다)
+      const asked = String(params.protocolVersion ?? '').trim();
+      const version = PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0];
       return rpcOk(id, {
         protocolVersion: version,
         capabilities: { tools: { listChanged: false } },
@@ -531,22 +539,77 @@ async function handleRpc(sql: Sql, notify: Notify, rpc: Rpc): Promise<Record<str
 
 export type McpCors = Record<string, string>;
 
+/** 세션을 두지 않으므로 늘 같은 이름을 쓴다 — 세션 아이디를 꼭 받아야 하는 클라이언트용 */
+const MCP_SESSION = 'bmrws-stateless-1';
+const sessionId = (req: Request) => (req.headers.get('mcp-session-id') ?? '').trim() || MCP_SESSION;
+
+const KEEPALIVE_MS = 15_000;
+const MAX_KEEPALIVES = 4; // 60초품 뒤 조용히 닫는다 — 열어 둔 연결이 계속 쌓이지 않게
+
+/**
+ * GET /mcp 자리의 SSE 스트림.
+ * 이 서버는 먼저 보낼 말이 없지만, 2025-03-26/2025-06-18 규격에서 GET 은 스트림을 여는 자리다.
+ * 405 를 오류로 받아들이는 엄격한 클라이언트가 있어 200 text/event-stream 으로 열고
+ * `: connected` 주석만 보낸 뒤 15초마다 keepalive 를 보내다가 스스로 닫는다.
+ * 클라이언트가 끊으면 cancel() 에서 타이머를 정리한다.
+ */
+function sseStream(): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let done = false;
+  const stop = () => {
+    done = true;
+    if (timer !== undefined) { clearInterval(timer); timer = undefined; }
+  };
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (text: string) => {
+        if (done) return false;
+        try { controller.enqueue(enc.encode(text)); return true; } catch { stop(); return false; }
+      };
+      send(': connected\n\n');
+      let sent = 0;
+      timer = setInterval(() => {
+        if (done) return;
+        sent += 1;
+        if (sent > MAX_KEEPALIVES) {
+          stop();
+          try { controller.close(); } catch { /* 이미 닫힘 */ }
+          return;
+        }
+        send(': keepalive\n\n');
+      }, KEEPALIVE_MS);
+    },
+    cancel() { stop(); },
+  });
+}
+
 /** /mcp 요청 하나. 열쇠 확인은 부르는 쪽이 먼저 하고, 여기서는 JSON-RPC 만 다룬다 */
 export async function mcpApi(
   sql: Sql, req: Request, notify: Notify, cors: McpCors,
 ): Promise<Reply> {
-  const base = { ...cors, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
+  const sid = sessionId(req);
+  const session: Record<string, string> = { ...cors, 'Mcp-Session-Id': sid, 'Cache-Control': 'no-store' };
+  // 클라이언트가 아는 판을 보낸 경우에만 그 판을 되돌려준다 (모르는 값은 흉내내지 않는다)
+  const asked = (req.headers.get('mcp-protocol-version') ?? '').trim();
+  if (PROTOCOLS.includes(asked)) session['MCP-Protocol-Version'] = asked;
+
+  const base = { ...session, 'Content-Type': 'application/json; charset=utf-8', 'X-Content-Type-Options': 'nosniff' };
 
   if (req.method === 'GET') {
-    // 서버가 먼저 보내는 이벤트 스트림은 쓰지 않는다 (2025-03-26 규격에서 허용)
-    return { status: 405, body: rpcError(null, -32000, '이 서버는 GET 스트림을 열지 않습니다. POST 로 JSON-RPC 를 보내세요.'), headers: { ...base, Allow: 'POST, DELETE' } };
+    // 보낼 이벤트는 없지만 스트림 자리를 열어 준다 (405 는 엄격한 클라이언트가 연결 실패로 본다)
+    return {
+      status: 200, body: null,
+      headers: { ...session, 'Content-Type': 'text/event-stream; charset=utf-8', 'X-Accel-Buffering': 'no' },
+      stream: sseStream(),
+    };
   }
   if (req.method === 'DELETE') {
     // 무상태라 정리할 세션이 없다
-    return { status: 204, body: null, headers: { ...cors, 'Cache-Control': 'no-store' } };
+    return { status: 204, body: null, headers: session };
   }
   if (req.method !== 'POST') {
-    return { status: 405, body: rpcError(null, -32000, 'POST 만 받습니다.'), headers: { ...base, Allow: 'POST, DELETE' } };
+    return { status: 405, body: rpcError(null, -32000, 'GET·POST·DELETE 만 받습니다.'), headers: { ...base, Allow: 'GET, POST, DELETE' } };
   }
 
   const raw = await req.text();
@@ -565,7 +628,7 @@ export async function mcpApi(
       const r = await handleRpc(sql, notify, one as Rpc);
       if (r) out.push(r);
     }
-    if (!out.length) return { status: 202, body: null, headers: cors };
+    if (!out.length) return { status: 202, body: null, headers: session };
     return { status: 200, body: out, headers: base };
   }
 
@@ -573,7 +636,7 @@ export async function mcpApi(
     return { status: 400, body: rpcError(null, -32600, 'JSON-RPC 요청이 아닙니다.'), headers: base };
   }
   const out = await handleRpc(sql, notify, parsed as Rpc);
-  if (!out) return { status: 202, body: null, headers: cors }; // 알림은 본문 없이 202
+  if (!out) return { status: 202, body: null, headers: session }; // 알림은 본문 없이 202
   return { status: 200, body: out, headers: base };
 }
 
