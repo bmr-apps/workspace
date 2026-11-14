@@ -1,11 +1,26 @@
 // Alter(AI) 답변 만들기 — Gemini 를 서버에서만 부릅니다.
 // 키는 함수 비밀값 WORKSPACE_GEMINI_API_KEY 에서 읽고, 브라우저에는 절대 내려보내지 않습니다.
-// 모델은 WORKSPACE_GEMINI_MODEL 로 바꿀 수 있고, 없으면 gemini-2.5-flash 를 씁니다.
+//
+// 모델은 WORKSPACE_GEMINI_MODEL 로 정할 수 있지만, 그 모델이 없거나(404) 이 키에서 못 쓰면
+// 아래 후보들을 차례로 시도하고, 그래도 안 되면 Gemini 의 모델 목록을 조회해 쓸 수 있는 모델을
+// 골라 기억합니다(콜드 스타트마다 한 번). 그래서 모델 이름이 바뀌어도 Alter 가 멈추지 않습니다.
 
 const PREFIX = 'WORKSPACE_';
 const key = () => Deno.env.get(PREFIX + 'GEMINI_API_KEY') ?? '';
-export const model = () => Deno.env.get(PREFIX + 'GEMINI_MODEL')?.trim() || 'gemini-2.5-flash';
+const envModel = () => (Deno.env.get(PREFIX + 'GEMINI_MODEL') ?? '').trim();
 export const hasKey = () => key() !== '';
+
+/** 설정값 → 기억해 둔 모델 → 기본 후보 순서. 화면(/hello)에는 이 값을 보여 줍니다. */
+const CANDIDATES = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+let cached = '';
+export const currentModel = () => cached || envModel() || CANDIDATES[0];
+
+/** 마지막 AI 시도 결과 (진단용 — 비밀값은 담지 않음) */
+let last: { at: string; model: string; source: AiResult['source']; status: number } | null = null;
+export const lastAiResult = () => last;
+const remember = (model: string, source: AiResult['source'], status: number) => {
+  last = { at: new Date().toISOString(), model, source, status };
+};
 
 export type Turn = { author: string; kind: 'user' | 'ai'; content: string };
 
@@ -36,7 +51,7 @@ function buildPrompt(channel: string, turns: Turn[], ask: string): string {
   ].join('\n');
 }
 
-export type AiResult = { text: string; source: 'gemini' | 'fallback' | 'error' };
+export type AiResult = { text: string; source: 'gemini' | 'fallback' | 'error'; model?: string };
 
 const FALLBACK = [
   '지금은 제 AI 열쇠(`WORKSPACE_GEMINI_API_KEY`)가 아직 연결되지 않아서 실제 답변을 만들 수 없어요.',
@@ -46,49 +61,139 @@ const FALLBACK = [
   '그동안에도 이 워크스페이스는 그대로 쓸 수 있어요. 채널에 글을 남기고 스레드로 이어 가면 됩니다. 🙂',
 ].join('\n');
 
-/** Alter 의 답변 한 개. 실패해도 예외를 던지지 않고 사람이 읽을 수 있는 문장을 돌려줍니다. */
-export async function ask(opts: { channel: string; turns: Turn[]; message: string }): Promise<AiResult> {
-  const k = key();
-  if (!k) return { text: FALLBACK, source: 'fallback' };
-  const m = model();
-  let status = 0;
+// ---------- Gemini 호출 ----------
+type Attempt = { status: number; text: string; note: string };
+
+async function generate(model: string, prompt: string, timeoutMs: number): Promise<Attempt> {
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key() },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: SYSTEM }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.6, maxOutputTokens: 1200 },
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const raw = await r.text();
+  if (r.status >= 400) {
+    console.error('gemini', model, r.status, raw.slice(0, 300));
+    return { status: r.status, text: '', note: raw.slice(0, 300) };
+  }
   try {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m)}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': k },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM }] },
-        contents: [{ role: 'user', parts: [{ text: buildPrompt(opts.channel, opts.turns, opts.message) }] }],
-        generationConfig: { temperature: 0.6, maxOutputTokens: 1200 },
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
-    status = r.status;
-    const raw = await r.text();
-    if (r.status >= 400) {
-      console.error('gemini', r.status, raw.slice(0, 300));
-      return { text: explain(status), source: 'error' };
-    }
     const j = JSON.parse(raw) as {
       candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
       promptFeedback?: { blockReason?: string };
     };
     const text = (j.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('').trim();
-    if (!text) {
-      const blocked = j.promptFeedback?.blockReason || j.candidates?.[0]?.finishReason || '';
-      return { text: blocked ? `이 내용에는 답하기 어려워요 (${blocked}). 다른 말로 다시 물어봐 주세요.` : '답변을 만들지 못했어요. 다시 한 번 물어봐 주세요.', source: 'error' };
-    }
-    return { text: text.slice(0, 6000), source: 'gemini' };
-  } catch (e) {
-    console.error('gemini', (e as Error)?.name ?? '', (e as Error)?.message ?? e);
-    return { text: explain(status), source: 'error' };
+    const note = text ? '' : (j.promptFeedback?.blockReason || j.candidates?.[0]?.finishReason || '');
+    return { status: r.status, text, note };
+  } catch {
+    return { status: r.status, text: '', note: '' };
   }
+}
+
+/** 이 키로 쓸 수 있는 모델 목록 (flash 계열 우선) */
+async function discover(deadline: number): Promise<string[]> {
+  const left = deadline - Date.now();
+  if (left < 2000) return [];
+  try {
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', {
+      headers: { 'x-goog-api-key': key() },
+      signal: AbortSignal.timeout(Math.min(15_000, left)),
+    });
+    if (!r.ok) {
+      console.error('gemini models', r.status, (await r.text()).slice(0, 200));
+      return [];
+    }
+    const j = await r.json() as { models?: { name?: string; supportedGenerationMethods?: string[] }[] };
+    const names = (j.models ?? [])
+      .filter((m) => (m.supportedGenerationMethods ?? []).includes('generateContent'))
+      .map((m) => String(m.name ?? '').replace(/^models\//, ''))
+      .filter((n) => n.toLowerCase().includes('gemini'));
+    const score = (n: string) =>
+      (n.includes('flash') ? 4 : 0) +
+      (n.includes('2.5') ? 3 : n.includes('2.0') ? 2 : n.includes('1.5') ? 1 : 0) -
+      (n.includes('pro') ? 1 : 0) -
+      (n.includes('exp') || n.includes('preview') ? 0.5 : 0);
+    return names.sort((a, b) => score(b) - score(a));
+  } catch (e) {
+    console.error('gemini models', (e as Error)?.message ?? e);
+    return [];
+  }
+}
+
+/** Alter 의 답변 한 개. 실패해도 예외를 던지지 않고 사람이 읽을 수 있는 문장을 돌려줍니다. */
+export async function ask(opts: { channel: string; turns: Turn[]; message: string }): Promise<AiResult> {
+  if (!key()) {
+    remember('-', 'fallback', 0);
+    return { text: FALLBACK, source: 'fallback' };
+  }
+  const prompt = buildPrompt(opts.channel, opts.turns, opts.message);
+  const deadline = Date.now() + 100_000; // 함수 실행 한도 안에서만 시도
+  let lastBad = 0;
+  let sawQuota = false;
+
+  const order = [...new Set([envModel(), cached, ...CANDIDATES].filter(Boolean))];
+  const tryModel = async (m: string): Promise<AiResult | null> => {
+    if (Date.now() > deadline) return null;
+    try {
+      const g = await generate(m, prompt, Math.min(45_000, deadline - Date.now()));
+      lastBad = g.status;
+      // 모델이 없거나(404) 이 키에서 못 쓰는 경우(400) → 다음 후보
+      if (g.status === 404 || g.status === 400) return null;
+      if (g.status === 429) { sawQuota = true; return null; }
+      if (g.status >= 400) {
+        remember(m, 'error', g.status);
+        return { text: explain(g.status), source: 'error', model: m };
+      }
+      if (!g.text) {
+        remember(m, 'error', g.status);
+        return {
+          text: g.note ? `이 내용에는 답하기 어려워요 (${g.note}). 다른 말로 다시 물어봐 주세요.` : '답변을 만들지 못했어요. 다시 한 번 물어봐 주세요.',
+          source: 'error', model: m,
+        };
+      }
+      cached = m;
+      remember(m, 'gemini', g.status);
+      return { text: g.text.slice(0, 6000), source: 'gemini', model: m };
+    } catch (e) {
+      console.error('gemini', m, (e as Error)?.name ?? '', (e as Error)?.message ?? e);
+      lastBad = 0;
+      return null;
+    }
+  };
+
+  for (const m of order) {
+    const out = await tryModel(m);
+    if (out) return out;
+  }
+
+  // 후보가 모두 안 되면 이 키에서 쓸 수 있는 모델을 찾아 본다
+  const usable = await discover(deadline);
+  for (const m of usable.slice(0, 3)) {
+    if (order.includes(m)) continue;
+    const out = await tryModel(m);
+    if (out) return out;
+  }
+
+  remember(cached || currentModel(), 'error', lastBad);
+  if (sawQuota) return { text: explain(429), source: 'error' };
+  return {
+    text: [
+      `지금은 쓸 수 있는 Gemini 모델을 찾지 못했어요${lastBad ? ` (마지막 오류 HTTP ${lastBad})` : ''}.`,
+      '',
+      `서버가 \`${currentModel()}\` 부터 여러 모델을 차례로 시도했지만 이 열쇠로는 모두 거절됐습니다.`,
+      '허브 → 내 서비스 → 앱 정보 → 개발자 셀프서비스에서 `WORKSPACE_GEMINI_API_KEY` 와 `WORKSPACE_GEMINI_MODEL`(선택) 값을 확인해 주세요.',
+    ].join('\n'),
+    source: 'error',
+  };
 }
 
 function explain(status: number): string {
   if (status === 429) return '지금 AI 요청이 잠시 몰려서 답을 못 만들었어요 (한도 초과). 1~2분 뒤에 다시 불러 주세요.';
   if (status === 403 || status === 401) return 'AI 열쇠가 거절됐어요 (`WORKSPACE_GEMINI_API_KEY`). 관리자에게 열쇠를 다시 확인해 달라고 알려 주세요.';
-  if (status === 404) return `AI 모델 이름(${model()})을 찾지 못했어요. \`WORKSPACE_GEMINI_MODEL\` 값을 확인해 주세요.`;
+  if (status === 404) return '이 열쇠로 쓸 수 있는 AI 모델을 찾지 못했어요. `WORKSPACE_GEMINI_MODEL` 값을 확인해 주세요.';
   if (status >= 500) return 'AI 쪽에 일시적인 문제가 생겼어요. 잠시 뒤 다시 불러 주세요.';
   if (status === 0) return 'AI 에 연결하지 못했어요. 잠시 뒤 다시 불러 주세요.';
   return `답변을 만드는 중 문제가 생겼어요 (HTTP ${status}). 잠시 뒤 다시 불러 주세요.`;

@@ -13,7 +13,7 @@
 // 비밀값: WORKSPACE_DB_URL, WORKSPACE_GEMINI_API_KEY, WORKSPACE_GEMINI_MODEL(선택)
 import postgres from 'npm:postgres@3.4.5';
 import { DDL, SEED_CHANNELS, CHECK_TABLES } from './schema.ts';
-import { ask, hasKey as aiHasKey, model as aiModel, type Turn } from './ai.ts';
+import { ask, hasKey as aiHasKey, currentModel, lastAiResult, type Turn } from './ai.ts';
 
 const FN = 'workspace-fn';
 const SCHEMA = 'workspace';
@@ -274,7 +274,7 @@ async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, ch
   try {
     const [aiRow] = await sql`insert into ${sql(SCHEMA)}.messages (channel_id, parent_id, user_id, author_name, author_kind, content)
       values (${channelId}, ${aiParent}, ${null}, ${'Alter'}, ${'ai'}, ${res.text}) returning *`;
-    return { message, ai: { ...asMessage(aiRow), source: res.source, model: res.source === 'gemini' ? aiModel() : null } };
+    return { message, ai: { ...asMessage(aiRow), source: res.source, model: res.source === 'gemini' ? (res.model ?? currentModel()) : null } };
   } catch (e) {
     console.error(FN, 'ai insert', (e as Error)?.message ?? e);
     return { message, ai: null, ai_error: 'Alter 의 답글을 저장하지 못했어요.' };
@@ -310,14 +310,14 @@ Deno.serve(async (req) => {
       } catch (e) {
         console.error(FN, 'schema', (e as Error)?.message ?? e);
       }
-      return json(req, 200, { ok: true, db: true, schema, ...(counts || {}), function: FN });
+      return json(req, 200, { ok: true, db: true, schema, ...(counts || {}), ai_last: lastAiResult(), function: FN });
     }
 
     const user = await getUser(req);
     if (path === '/hello') {
       return json(req, 200, {
         app: SCHEMA, user: user ? { id: user.id, email: user.email, name: user.name } : null,
-        db: Boolean(sql), gemini_key_set: aiHasKey(), gemini_model: aiModel(), time: new Date().toISOString(),
+        db: Boolean(sql), gemini_key_set: aiHasKey(), gemini_model: currentModel(), time: new Date().toISOString(),
       });
     }
     if (!sql) return json(req, 503, { error: '서버 설정이 아직 끝나지 않았습니다 (DB 연결 정보 없음).' });
