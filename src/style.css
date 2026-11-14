@@ -498,3 +498,12 @@ a { color: inherit; }
   .huddle.big .huddle-tiles { grid-template-columns: 1fr; }
   .huddle.big .hd-tile { max-height: 40vh; }
 }
+
+/* 아주 좁은 화면: 머리줄 버튼이 늘어나 ☰ 배지가 화면 밖으로 밀리지 않게 */
+@media (max-width: 420px) {
+  .who { display: none; }
+  .top { padding: 0 8px; }
+  .top-right { gap: 5px; }
+  .top-right .btn.small { padding: 3px 7px; font-size: 11px; }
+  .btn.icon { min-height: 34px; width: 34px; }
+}
