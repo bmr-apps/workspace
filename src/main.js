@@ -903,7 +903,7 @@ function closeLinkModal() {
 }
 
 // ---------- 음성·화상 회의(허들) ----------
-const huddleTiles = new Map(); // 참가자 id → { el, video }
+const huddleTiles = new Map(); // 참가자 id → { el, video, audio }
 
 function huddleAllowed(ch) {
   return Boolean(ch && (ch.kind === 'channel' || ch.kind === 'dm'));
@@ -936,7 +936,8 @@ function buildTile(p) {
   const video = document.createElement('video');
   video.autoplay = true;
   video.playsInline = true;
-  video.muted = Boolean(p.local); // 내 소리가 되돌아 들리지 않게
+  // 영상은 늘 소리 없이 — 남의 소리는 아래 audio 가 낸다 (화상이 꺼져 있어도 소리가 나야 하므로)
+  video.muted = true;
   video.setAttribute('playsinline', '');
   const av = el('div', 'hd-av', firstChar(p.name));
   av.style.background = tileColor(p.id);
@@ -946,14 +947,47 @@ function buildTile(p) {
   const scr = el('span', 'hd-scr', '🖥️');
   bar.append(nm, mic, scr);
   el2.append(video, av, bar);
-  return { el: el2, video, av, mic, scr };
+  // 남의 소리 전용 <audio> — 음성 회의(영상 없음)에서도 이 요소로 들린다.
+  // 화면에서 숨기려고 display:none 을 주지 않는다(controls 가 없으면 원래 자리를 차지하지 않는다).
+  let audio = null;
+  if (!p.local) {
+    audio = document.createElement('audio');
+    audio.autoplay = true;
+    audio.setAttribute('playsinline', '');
+    el2.appendChild(audio);
+  }
+  return { el: el2, video, audio, av, mic, scr };
 }
 
+/** 타일을 화면에서 거둘 때 — 붙여 둔 스트림을 놓아 소리·영상이 남지 않게 */
+function disposeTile(tile) {
+  try { tile.video.srcObject = null; } catch { /* 무시 */ }
+  if (tile.audio) {
+    try { tile.audio.pause(); tile.audio.srcObject = null; } catch { /* 무시 */ }
+  }
+  tile.el.remove();
+}
+
+const playQuietly = (node) => {
+  const pr = node.play();
+  if (pr && pr.catch) pr.catch(() => { /* 자동재생 실패는 무시 (다음 render 에서 다시 시도) */ });
+};
+
 function updateTile(tile, p) {
+  // 남의 소리는 영상 유무·compact 모드와 상관없이 늘 audio 로 붙인다 (음성 회의가 들리게)
+  if (tile.audio) {
+    const sound = p.stream || null;
+    if (tile.audio.srcObject !== sound) {
+      tile.audio.srcObject = sound;
+      if (sound) playQuietly(tile.audio);
+    } else if (sound && tile.audio.paused) {
+      playQuietly(tile.audio);
+    }
+  }
   const stream = p.video && p.stream ? p.stream : null;
   if (tile.video.srcObject !== stream) {
     tile.video.srcObject = stream;
-    if (stream) { const pr = tile.video.play(); if (pr && pr.catch) pr.catch(() => { /* 자동재생 실패는 무시 */ }); }
+    if (stream) playQuietly(tile.video);
   }
   tile.el.classList.toggle('video-off', !stream);
   tile.el.classList.toggle('speaking', Boolean(p.speaking));
@@ -968,7 +1002,7 @@ function renderHuddle() {
   const h = S.huddle;
   if (!h) {
     box.hidden = true;
-    for (const [, t] of huddleTiles) t.el.remove();
+    for (const [, t] of huddleTiles) disposeTile(t);
     huddleTiles.clear();
     updateHuddleButtons();
     return;
@@ -991,7 +1025,7 @@ function renderHuddle() {
     if (!tile) { tile = buildTile(p); huddleTiles.set(key, tile); wrap.appendChild(tile.el); }
     updateTile(tile, p);
   }
-  for (const [id, t] of [...huddleTiles]) if (!seen.has(id)) { t.el.remove(); huddleTiles.delete(id); }
+  for (const [id, t] of [...huddleTiles]) if (!seen.has(id)) { disposeTile(t); huddleTiles.delete(id); }
 
   const l = h.local;
   const micBtn = $('huddle-mic');

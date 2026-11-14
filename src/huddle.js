@@ -310,6 +310,8 @@ export class Huddle {
     const key = String(id);
     const entry = this.pcs.get(key);
     if (entry) {
+      // 받고 있던 소리·영상 트랙을 먼저 끊어 소리가 남지 않게 (pc.close 만 믿지 않는다)
+      try { entry.stream.getTracks().forEach((t) => t.stop()); } catch { /* 무시 */ }
       try { entry.pc.close(); } catch { /* 무시 */ }
       this.pcs.delete(key);
     }
