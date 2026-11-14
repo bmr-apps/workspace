@@ -6,6 +6,9 @@ import { liveApi } from './api.js';
 import { previewApi } from './preview.js';
 import { renderMarkdown } from './markdown.js';
 import { local } from './store.js';
+import {
+  MAX_FILES, MAX_FILE_BYTES, isImage, formatSize, previewAttachment, uploadAttachment, removeUploaded, fileUrl,
+} from './files.js';
 
 const $ = (id) => document.getElementById(id);
 const TZ = 'Asia/Seoul';
@@ -34,6 +37,8 @@ const S = {
   aiKeySet: true,
   hasSession: false,
   unread: {},
+  pending: { channel: [], thread: [] }, // 아직 보내지 않은 첨부
+  uploading: false,
   baseTitle: '별무리 워크스페이스 · BMR APPS',
   unsub: null,
   poll: null,
@@ -82,6 +87,156 @@ function showChatError(msg) {
   const e = $('chat-error');
   e.textContent = msg || '';
   e.hidden = !msg;
+}
+
+// ---------- 사진·파일 첨부 ----------
+const pendingOf = (inThread) => (inThread ? S.pending.thread : S.pending.channel);
+
+/** 텍스트 칸·화면에 고른 파일을 더한다 (한 번에 5개, 한 개 10MB 까지) */
+function addFiles(fileList, inThread) {
+  const list = pendingOf(inThread);
+  let added = 0;
+  for (const f of Array.from(fileList || [])) {
+    if (!f) continue;
+    if (list.length >= MAX_FILES) { toast(`첨부는 한 번에 ${MAX_FILES}개까지예요.`, 'err'); break; }
+    if (f.size > MAX_FILE_BYTES) { toast(`«${f.name || '파일'}» 은(는) 10MB를 넘어 첨부할 수 없어요.`, 'err'); continue; }
+    if (f.size === 0) { toast(`«${f.name || '파일'}» 이(가) 비어 있어요.`, 'err'); continue; }
+    list.push({
+      id: 'f-' + Math.random().toString(36).slice(2, 9),
+      file: f, name: f.name || '파일', mime: f.type || '', size: f.size,
+      preview: isImage(f.type) ? URL.createObjectURL(f) : '',
+      state: 'ready', att: null,
+    });
+    added++;
+  }
+  if (!added) return;
+  renderPending(inThread);
+  updateComposer();
+}
+
+function dropPending(item, inThread) {
+  const list = pendingOf(inThread);
+  const i = list.indexOf(item);
+  if (i >= 0) list.splice(i, 1);
+  if (item.preview) { try { URL.revokeObjectURL(item.preview); } catch { /* 무시 */ } }
+  renderPending(inThread);
+  updateComposer();
+}
+
+function clearPending(inThread) {
+  for (const item of pendingOf(inThread)) {
+    if (item.preview) { try { URL.revokeObjectURL(item.preview); } catch { /* 무시 */ } }
+  }
+  S.pending[inThread ? 'thread' : 'channel'] = [];
+  renderPending(inThread);
+  updateComposer();
+}
+
+/** 보내기 전 고른 파일 미리보기 줄 */
+function renderPending(inThread) {
+  const box = $(inThread ? 'thread-files' : 'composer-files');
+  if (!box) return;
+  const list = pendingOf(inThread);
+  box.textContent = '';
+  box.hidden = list.length === 0;
+  for (const item of list) {
+    const chip = el('div', 'att-chip' + (item.state === 'uploading' ? ' busy' : ''));
+    if (item.preview) {
+      const im = document.createElement('img');
+      im.className = 'att-chip-img';
+      im.src = item.preview;
+      im.alt = '';
+      chip.appendChild(im);
+    } else {
+      chip.appendChild(el('span', 'att-chip-ico', '📄'));
+    }
+    const meta = el('div', 'att-chip-meta');
+    meta.appendChild(el('b', 'att-chip-name', item.name));
+    const state = item.state === 'uploading' ? '올리는 중…' : item.state === 'done' ? '올림' : formatSize(item.size);
+    meta.appendChild(el('span', 'att-chip-size', state));
+    chip.appendChild(meta);
+    const x = el('button', 'att-chip-x', '✕');
+    x.type = 'button';
+    x.title = '첨부 빼기';
+    x.setAttribute('aria-label', `${item.name} 첨부 빼기`);
+    x.disabled = item.state === 'uploading';
+    x.addEventListener('click', () => dropPending(item, inThread));
+    chip.appendChild(x);
+    box.appendChild(chip);
+  }
+}
+
+// ---------- 사진 크게 보기 ----------
+function openLightbox(url, att) {
+  if (!url) return;
+  const img = $('lightbox-img');
+  img.src = url;
+  img.alt = (att && att.name) || '사진';
+  $('lightbox-name').textContent = (att && att.name) || '';
+  $('lightbox-open').href = url;
+  const dl = $('lightbox-download');
+  dl.href = url;
+  if (att && !att.url) {
+    dl.href = '#';
+    fileUrl(att, { download: true }).then((u) => { dl.href = u; }).catch(() => { dl.removeAttribute('href'); });
+  }
+  $('lightbox').hidden = false;
+}
+function closeLightbox() {
+  const box = $('lightbox');
+  if (!box || box.hidden) return;
+  box.hidden = true;
+  $('lightbox-img').src = '';
+}
+
+/** 메시지 안의 사진·파일 — 사진은 바로 보이고, 파일은 내려받는 카드 */
+function attachmentsEl(atts) {
+  const wrap = el('div', 'msg-atts');
+  for (const att of atts) {
+    if (!att || !att.path) continue;
+    if (isImage(att.mime)) {
+      const btn = el('button', 'att-img');
+      btn.type = 'button';
+      btn.title = `${att.name} — 눌러서 크게 보기`;
+      const ph = el('span', 'att-img-ph', '🖼️');
+      const img = document.createElement('img');
+      img.alt = att.name || '사진';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.hidden = true;
+      btn.append(ph, img);
+      const cap = el('span', 'att-img-cap', att.name || '');
+      btn.appendChild(cap);
+      btn.addEventListener('click', () => {
+        if (img.src) { openLightbox(img.src, att); return; }
+        toast('사진을 불러오는 중이에요. 잠시 뒤 다시 눌러 주세요.');
+      });
+      fileUrl(att).then((u) => { img.src = u; img.hidden = false; ph.hidden = true; })
+        .catch(() => { ph.textContent = '🖼️ 사진을 불러오지 못했어요'; btn.disabled = true; });
+      wrap.appendChild(btn);
+    } else {
+      const a = el('a', 'att-file');
+      a.target = '_blank';
+      a.rel = 'noreferrer noopener';
+      a.title = `${att.name} 내려받기`;
+      a.append(el('span', 'att-file-ico', '📄'));
+      const meta = el('span', 'att-file-meta');
+      meta.appendChild(el('b', 'att-file-name', att.name || '파일'));
+      meta.appendChild(el('span', 'att-file-size', formatSize(att.size)));
+      a.appendChild(meta);
+      a.addEventListener('click', (e) => {
+        if (a.href && a.getAttribute('href') !== '#') return;
+        e.preventDefault();
+        if (a.dataset.busy) return;
+        a.dataset.busy = '1';
+        fileUrl(att, { download: true }).then((u) => { a.href = u; a.dataset.busy = ''; a.click(); })
+          .catch(() => { a.dataset.busy = ''; toast('첨부 파일을 열지 못했어요.', 'err'); });
+      });
+      fileUrl(att, { download: true }).then((u) => { a.href = u; }).catch(() => { /* 누를 때 다시 시도 */ });
+      wrap.appendChild(a);
+    }
+  }
+  return wrap;
 }
 
 // ---------- 안 읽은 배지(채널·DM·제목·메뉴) ----------
@@ -290,8 +445,9 @@ function messageEl(m, inThread = false) {
   body.appendChild(head);
 
   const text = el('div', 'msg-text');
-  text.appendChild(renderMarkdown(m.content));
-  body.appendChild(text);
+  if (m.content) text.appendChild(renderMarkdown(m.content));
+  if (m.attachments && m.attachments.length) text.appendChild(attachmentsEl(m.attachments));
+  if (m.content || (m.attachments && m.attachments.length)) body.appendChild(text);
 
   if (!inThread) {
     const n = Number(m.reply_count || 0);
@@ -409,6 +565,7 @@ async function reload({ silent = true } = {}) {
 
 async function selectChannel(id) {
   if (!S.channels.some((c) => c.id === id)) return;
+  if (S.channelId !== id) { clearPending(false); clearPending(true); }
   S.channelId = id;
   S.threadOpen = false;
   S.threadParent = null;
@@ -480,8 +637,12 @@ function autoGrow(ta) {
 function updateComposer() {
   const ch = $('composer-input');
   const th = $('thread-input');
-  $('send').disabled = S.sending || !ch.value.trim() || !S.channelId;
-  $('thread-send').disabled = S.sending || !th.value.trim() || !S.threadParent;
+  const chFiles = S.pending.channel.length;
+  const thFiles = S.pending.thread.length;
+  $('send').disabled = S.sending || S.uploading || (!ch.value.trim() && !chFiles) || !S.channelId;
+  $('thread-send').disabled = S.sending || S.uploading || (!th.value.trim() && !thFiles) || !S.threadParent;
+  $('send').textContent = S.uploading ? '올리는 중…' : '보내기';
+  $('thread-send').textContent = S.uploading ? '올리는 중…' : '답글';
   $('composer-input').placeholder = currentChannel()
     ? (currentChannel().kind === 'channel' ? `#${currentChannel().name} 에 메시지 보내기` : `${currentChannel().name} 에 메시지 보내기`)
     : '메시지 보내기';
@@ -490,12 +651,38 @@ function updateComposer() {
 async function send(inThread) {
   const ta = $(inThread ? 'thread-input' : 'composer-input');
   const text = ta.value.trim();
-  if (!text || S.sending || !S.channelId) return;
+  const pending = pendingOf(inThread);
+  if (S.sending || S.uploading || !S.channelId) return;
+  if (!text && !pending.length) return;
   if (inThread && !S.threadParent) return;
   const channelId = S.channelId;
   const parentId = inThread ? S.threadParent.id : null;
   const ch = currentChannel();
   const aiExpected = (ch && ch.kind === 'ai') || /@\s?(ai|alter)\b/i.test(text);
+
+  // 1) 고른 사진·파일을 먼저 올린다 (미리보기 모드는 이 브라우저 안에서만)
+  const attachments = [];
+  if (pending.length) {
+    S.uploading = true;
+    updateComposer();
+    try {
+      for (const item of [...pending]) {
+        if (item.state === 'done' && item.att) { attachments.push(item.att); continue; }
+        item.state = 'uploading';
+        renderPending(inThread);
+        item.att = S.mode === 'preview' ? previewAttachment(item.file) : await uploadAttachment(item.file);
+        item.state = 'done';
+        renderPending(inThread);
+      }
+    } catch (e) {
+      S.uploading = false;
+      updateComposer();
+      renderPending(inThread);
+      toast(e.message || '파일을 올리지 못했어요.', 'err');
+      return;
+    }
+    S.uploading = false;
+  }
 
   S.sending = true;
   updateComposer();
@@ -504,8 +691,8 @@ async function send(inThread) {
 
   const tmp = {
     id: 'tmp-' + Date.now(), channel_id: channelId, parent_id: parentId, user_id: S.me.id,
-    author_name: S.me.name, author_kind: 'user', content: text, created_at: new Date().toISOString(),
-    reply_count: 0, pending: true,
+    author_name: S.me.name, author_kind: 'user', content: text, attachments: attachments.slice(),
+    created_at: new Date().toISOString(), reply_count: 0, pending: true,
   };
   if (inThread) { S.threadReplies.push(tmp); renderThread(); }
   else { S.messages.push(tmp); renderMessages(true); }
@@ -517,11 +704,12 @@ async function send(inThread) {
   S.sig = currentSig();
 
   try {
-    const res = await S.api.post({ channelId, content: text, parentId });
+    const res = await S.api.post({ channelId, content: text, parentId, attachments });
     S.aiPending = false;
     S.aiPendingWhere = null;
     if (inThread) S.threadReplies = S.threadReplies.filter((m) => m !== tmp);
     else S.messages = S.messages.filter((m) => m !== tmp);
+    clearPending(inThread);
     if (res.ai_error) toast(res.ai_error, 'err');
     if (res.ai && res.ai.source === 'fallback') toast('AI 열쇠가 아직 없어서 안내 문구로 답했어요.', 'err');
     await reload();
@@ -531,8 +719,15 @@ async function send(inThread) {
     S.aiPendingWhere = null;
     if (inThread) S.threadReplies = S.threadReplies.filter((m) => m !== tmp);
     else S.messages = S.messages.filter((m) => m !== tmp);
+    // 올린 파일은 지우고, 고른 목록은 그대로 둔어 다시 보낼 수 있게 한다
+    if (attachments.length) {
+      const keepPaths = new Set(attachments.map((a) => a.path));
+      await removeUploaded(attachments);
+      for (const item of pendingOf(inThread)) if (item.att && keepPaths.has(item.att.path)) { item.state = 'ready'; item.att = null; }
+    }
     renderMessages();
     renderThread();
+    renderPending(inThread);
     ta.value = text;
     autoGrow(ta);
     toast(e.message || '보내지 못했어요. 잠시 뒤 다시 시도해 주세요.', 'err');
@@ -588,6 +783,10 @@ function teardown() {
   S.aiPending = false;
   S.aiPendingWhere = null;
   S.sending = false;
+  S.uploading = false;
+  clearPending(false);
+  clearPending(true);
+  closeLightbox();
   S.aiKeySet = true;
   S.starting = false;
   S.sig = '';
@@ -869,7 +1068,60 @@ function bind() {
         send(isThread);
       }
     });
+    ta.addEventListener('paste', (e) => {
+      const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+      if (!files.length) return;
+      e.preventDefault();
+      addFiles(files, isThread);
+    });
   }
+
+  // ---------- 사진·파일 버튼·끌어다 놓기 ----------
+  for (const [btnId, inputId, isThread] of [['attach', 'composer-file', false], ['thread-attach', 'thread-file', true]]) {
+    const b = $(btnId);
+    const inp = $(inputId);
+    if (!b || !inp) continue;
+    b.addEventListener('click', () => inp.click());
+    inp.addEventListener('change', () => {
+      addFiles(inp.files, isThread);
+      inp.value = '';
+    });
+  }
+  const hasFiles = (e) => Array.from((e.dataTransfer && e.dataTransfer.types) || []).includes('Files');
+  const bindDrop = (zone, inThread) => {
+    if (!zone) return;
+    let depth = 0;
+    zone.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth++;
+      zone.classList.add('drop-on');
+    });
+    zone.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    });
+    zone.addEventListener('dragleave', () => {
+      depth = Math.max(0, depth - 1);
+      if (!depth) zone.classList.remove('drop-on');
+    });
+    zone.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      zone.classList.remove('drop-on');
+      addFiles(e.dataTransfer.files, inThread);
+      const ta = $(inThread ? 'thread-input' : 'composer-input');
+      if (ta) ta.focus();
+    });
+  };
+  bindDrop($('chat-body'), false);
+  bindDrop(document.querySelector('.thread-body'), true);
+
+  // 사진 크게 보기 닫기
+  $('lightbox-close').addEventListener('click', closeLightbox);
+  $('lightbox').addEventListener('click', (e) => { if (e.target === $('lightbox')) closeLightbox(); });
 
   const insertMention = (ta) => {
     const at = ta.selectionStart ?? ta.value.length;
@@ -886,7 +1138,8 @@ function bind() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (S.threadOpen) closeThread();
+    if (!$('lightbox').hidden) closeLightbox();
+    else if (S.threadOpen) closeThread();
     else if ($('sidebar').classList.contains('open')) closeSidebar();
   });
   window.addEventListener('online', () => { $('conn').classList.remove('off'); reload(); });

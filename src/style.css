@@ -307,3 +307,75 @@ a { color: inherit; }
   .top { padding: 0 10px; gap: 8px; }
   .brand b { font-size: 15px; }
 }
+
+/* ---------- 사진·파일 첨부 ---------- */
+.composer { flex-wrap: wrap; }
+.file-in { display: none; }
+.chip-file {
+  min-height: 40px; width: 40px; padding: 0; border: var(--border); background: #fff;
+  font-size: 17px; line-height: 1; cursor: pointer; flex: none;
+}
+.chip-file:hover { background: var(--cyan); }
+.att-pending {
+  flex: 1 0 100%; display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 2px;
+}
+.att-chip {
+  display: inline-flex; align-items: center; gap: 7px; max-width: min(100%, 260px);
+  padding: 4px 6px; border: 1.5px solid #000; background: var(--bg-alt);
+}
+.att-chip.busy { background: var(--yellow-light); border-style: dashed; }
+.att-chip-img { width: 34px; height: 34px; object-fit: cover; border: 1.5px solid #000; flex: none; background: #fff; }
+.att-chip-ico { width: 34px; height: 34px; display: grid; place-items: center; border: 1.5px solid #000; background: #fff; font-size: 16px; flex: none; }
+.att-chip-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.att-chip-name { font-size: 12px; font-weight: 850; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.att-chip-size { font-size: 10.5px; font-weight: 700; color: var(--soft); white-space: nowrap; }
+.att-chip-x {
+  flex: none; width: 22px; height: 22px; padding: 0; border: 1.5px solid #000; background: #fff;
+  font-size: 11px; font-weight: 900; cursor: pointer; line-height: 1;
+}
+.att-chip-x:hover:not(:disabled) { background: var(--coral); }
+.att-chip-x:disabled { opacity: .4; cursor: not-allowed; }
+
+/* 메시지 안의 첨부 */
+.msg-atts { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 2px; }
+.att-img {
+  display: inline-flex; flex-direction: column; padding: 0; border: var(--border); background: #fff;
+  max-width: min(100%, 320px); cursor: zoom-in; overflow: hidden; box-shadow: var(--hard-sm);
+}
+.att-img:hover:not(:disabled) { border-color: var(--focus); }
+.att-img:disabled { cursor: default; opacity: .8; box-shadow: none; }
+.att-img img { display: block; max-width: 100%; max-height: 260px; object-fit: contain; background: var(--bg-alt); }
+.att-img-ph { display: grid; place-items: center; min-width: 160px; height: 110px; font-size: 26px; background: var(--bg-alt); color: var(--soft); }
+.att-img-cap {
+  display: block; width: 100%; padding: 3px 8px; border-top: 1.5px solid #000; background: #fff;
+  font-size: 11px; font-weight: 750; color: var(--muted); text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.att-file {
+  display: inline-flex; align-items: center; gap: 8px; max-width: min(100%, 320px); padding: 6px 10px;
+  border: var(--border); background: #fff; text-decoration: none; color: #000;
+}
+.att-file:hover { background: var(--cyan-light); }
+.att-file-ico { width: 30px; height: 30px; display: grid; place-items: center; border: 1.5px solid #000; background: var(--yellow-light); font-size: 15px; flex: none; }
+.att-file-meta { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.att-file-name { font-size: 12.5px; font-weight: 850; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.att-file-size { font-size: 10.5px; font-weight: 700; color: var(--soft); }
+.thread .att-img { max-width: 100%; }
+.thread .att-img img { max-height: 200px; }
+.drop-on { outline: 3px dashed var(--focus); outline-offset: -6px; background: var(--cyan-light); }
+
+/* 사진 크게 보기 */
+.lightbox {
+  position: fixed; inset: 0; z-index: 300; display: flex; flex-direction: column;
+  background: rgba(0, 0, 0, .86); padding: 12px;
+}
+.lightbox-bar { flex: none; display: flex; align-items: center; gap: 8px; padding-bottom: 10px; color: #fff; }
+.lightbox-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lightbox-bar .btn.ghost { border-color: #fff; }
+.lightbox-img { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: transparent; }
+@media (max-width: 860px) {
+  .chip-file { min-height: 38px; width: 38px; font-size: 16px; }
+  .att-img img { max-height: 220px; }
+  .att-chip-name { max-width: 110px; }
+  .composer-hint { line-height: 1.5; }
+}

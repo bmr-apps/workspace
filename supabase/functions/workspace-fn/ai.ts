@@ -22,7 +22,7 @@ const remember = (model: string, source: AiResult['source'], status: number) => 
   last = { at: new Date().toISOString(), model, source, status };
 };
 
-export type Turn = { author: string; kind: 'user' | 'ai'; content: string };
+export type Turn = { author: string; kind: 'user' | 'ai'; content: string; files?: string[] };
 
 const SYSTEM = [
   '너는 별무리학교의 교내 워크스페이스에서 함께 일하는 AI 조력자 "Alter" 다.',
@@ -32,15 +32,17 @@ const SYSTEM = [
   '- 대화에 없는 사실(학교 일정, 학생 개인정보, 성적, 연락처)은 지어내지 않는다. 모르면 모른다고 하고 무엇을 확인하면 되는지 알려 준다.',
   '- 학생 이름·연락처 같은 개인정보가 보이면 답변에 다시 옮겨 적지 않는다.',
   '- 마크다운을 써도 된다(굵게, 목록, `코드`, ```코드블록```). 표는 쓰지 않는다.',
+  '- 사진·파일은 **이름·종류·크기만** 알 수 있고 내용은 볼 수 없다. 사진에 무엇이 찍혔는지 지어내지 말고, 필요하면 "사진은 내용을 볼 수 없으니 글로 설명해 주세요"라고 짚어 준다.',
   '- 교사가 바로 실행할 수 있는 다음 행동을 한 가지 이상 제안한다.',
 ].join('\n');
 
 /** 최근 대화를 프롬프트로 정리 (너무 길면 잘라 냄) */
-function buildPrompt(channel: string, turns: Turn[], ask: string): string {
+function buildPrompt(channel: string, turns: Turn[], ask: string, files: string[] = []): string {
   const lines = turns.slice(-12).map((t) => {
     const who = t.kind === 'ai' ? 'Alter' : t.author || '선생님';
     const text = t.content.replace(/\s+/g, ' ').slice(0, 700);
-    return `${who}: ${text}`;
+    const att = t.files && t.files.length ? ` [첨부: ${t.files.join(', ')}]` : '';
+    return `${who}: ${text}${att}`;
   });
   return [
     `[채널] ${channel}`,
@@ -48,6 +50,7 @@ function buildPrompt(channel: string, turns: Turn[], ask: string): string {
     lines.length ? lines.join('\n') : '(아직 대화가 없습니다)',
     '[답할 메시지]',
     ask.slice(0, 2000),
+    ...(files.length ? [`[이 메시지의 첨부] ${files.join(', ')} (내용은 볼 수 없고 이름·종류만 압니다)`] : []),
   ].join('\n');
 }
 
@@ -124,12 +127,12 @@ async function discover(deadline: number): Promise<string[]> {
 }
 
 /** Alter 의 답변 한 개. 실패해도 예외를 던지지 않고 사람이 읽을 수 있는 문장을 돌려줍니다. */
-export async function ask(opts: { channel: string; turns: Turn[]; message: string }): Promise<AiResult> {
+export async function ask(opts: { channel: string; turns: Turn[]; message: string; files?: string[] }): Promise<AiResult> {
   if (!key()) {
     remember('-', 'fallback', 0);
     return { text: FALLBACK, source: 'fallback' };
   }
-  const prompt = buildPrompt(opts.channel, opts.turns, opts.message);
+  const prompt = buildPrompt(opts.channel, opts.turns, opts.message || '(글 없이 사진·파일만 보냈습니다)', opts.files ?? []);
   const deadline = Date.now() + 100_000; // 함수 실행 한도 안에서만 시도
   let lastBad = 0;
   let sawQuota = false;

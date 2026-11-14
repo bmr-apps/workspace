@@ -5,8 +5,12 @@
 //   GET  /hello                                   부른 사람, AI 열쇠 설정 여부
 //   GET  /bootstrap                               나·멤버·채널 목록 (기본 채널과 내 AI 방을 만들어 줌)
 //   POST /channels      {kind:'channel', name, description} | {kind:'dm', target_user_id}
-//   GET  /messages?channel_id=…[&parent_id=…]     채널 메시지 / 스레드 답글
-//   POST /messages      {channel_id, content, parent_id?}  메시지 쓰기 (+ @AI 면 Alter 답글)
+//   GET  /messages?channel_id=…[&parent_id=…]     채널 메시지 / 스레드 답글 (attachments 포함)
+//   POST /messages      {channel_id, content, parent_id?, attachments?}  메시지 쓰기 (+ @AI 면 Alter 답글)
+//
+// 사진·파일: 브라우저가 Storage 버킷 'workspace' 의 <내 아이디>/… 에 직접 올리고,
+// 이 함수에는 [{path,name,mime,size}] 만 받아 messages.attachments 에 적습니다.
+// 볼 때는 브라우저가 createSignedUrl 로 1시간짜리 주소를 만들어 씁니다(로그인한 사람은 이 버킷을 읽을 수 있음).
 //
 // 함수는 이 앱 전용 DB 계정(workspace_fn, 개발자 계정 권한을 물려받음)으로 접속해 RLS 를 거치지 않습니다.
 // 그래서 누가 무엇을 볼 수 있는지는 이 파일에서 직접 확인합니다 (memberFor / channelFor).
@@ -122,10 +126,73 @@ function colorFor(seed: string): string {
 
 type Member = { id: string; email: string; name: string; role: 'member' | 'admin'; avatar_color: string; last_seen_at: string | null };
 type Channel = { id: number; slug: string | null; name: string; kind: 'channel' | 'dm' | 'ai'; description: string; dm_key: string | null; created_at: string; unread: number };
+type Attachment = { path: string; name: string; mime: string; size: number };
 type Message = {
   id: number; channel_id: number; parent_id: number | null; user_id: string | null;
   author_name: string; author_kind: 'user' | 'ai'; content: string; created_at: string; reply_count: number;
+  attachments: Attachment[];
 };
+
+const MAX_FILES = 5;
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 버킷 한도와 같음
+const isImage = (mime: string) => /^image\//i.test(mime);
+
+/** DB 의 jsonb 값을 믿지 않고 모양을 맞춰 읽는다 (예전 메시지·잘못된 값은 빈 목록) */
+function readAttachments(v: unknown): Attachment[] {
+  let list: unknown = v;
+  if (typeof v === 'string') { try { list = JSON.parse(v); } catch { return []; } }
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, MAX_FILES).map((a) => {
+    const o = (a ?? {}) as Record<string, unknown>;
+    return {
+      path: String(o.path ?? ''),
+      name: String(o.name ?? '').slice(0, 200) || '파일',
+      mime: String(o.mime ?? 'application/octet-stream').slice(0, 100),
+      size: Number(o.size) || 0,
+    };
+  }).filter((a) => a.path);
+}
+
+/** 브라우저가 보낸 첨부 목록을 확인한다 — 내 폴더(<내 아이디>/…) 안의 영문 경로만 */
+function normAttachments(raw: unknown, meId: string): Attachment[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) throw new HttpError(400, '첨부 목록이 올바르지 않습니다.', 'bad_attachment');
+  if (raw.length > MAX_FILES) throw new HttpError(400, `첨부는 한 번에 ${MAX_FILES}개까지 보낼 수 있어요.`, 'too_many_files');
+  const out: Attachment[] = [];
+  for (const a of raw) {
+    const o = (a ?? {}) as Record<string, unknown>;
+    const path = String(o.path ?? '');
+    const seg = path.split('/');
+    const okPath = seg.length === 2 && seg[0] === meId
+      && /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(seg[1]) && seg[1] !== '.' && seg[1] !== '..';
+    if (!okPath) throw new HttpError(400, '첨부 파일 정보가 올바르지 않습니다.', 'bad_attachment');
+    const name = String(o.name ?? '').replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) || '파일';
+    const mimeRaw = String(o.mime ?? '');
+    const mime = /^[\w.+-]+\/[\w.+-]+$/.test(mimeRaw) ? mimeRaw.slice(0, 100) : 'application/octet-stream';
+    const size = Number(o.size);
+    if (!Number.isFinite(size) || size < 0) throw new HttpError(400, '첨부 파일 크기가 올바르지 않습니다.', 'bad_attachment');
+    if (size > MAX_FILE_BYTES) throw new HttpError(400, '한 파일은 10MB까지 보낼 수 있어요.', 'file_too_large');
+    out.push({ path, name, mime, size: Math.round(size) });
+  }
+  return out;
+}
+
+/** 알림 본문 — 글이 없으면 첨부만으로 짧게 */
+function pushBody(m: Message): string {
+  const files = m.attachments ?? [];
+  const text = m.content.replace(/\s+/g, ' ').trim();
+  if (text) return (files.length ? '📎 ' : '') + text.slice(0, 160);
+  if (!files.length) return '';
+  const first = files[0];
+  if (files.length === 1) return (isImage(first.mime) ? '🖼️ 사진' : `📎 파일: ${first.name}`).slice(0, 160);
+  const images = files.filter((f) => isImage(f.mime)).length;
+  if (images === files.length) return `🖼️ 사진 ${files.length}장`;
+  return `📎 파일 ${files.length}개: ${first.name}`.slice(0, 160);
+}
+
+/** AI 에게 알려 줄 첨부 설명 — 이름·종류만 (내용은 볼 수 없음) */
+const fileNotes = (files: Attachment[]) =>
+  files.map((f) => `${isImage(f.mime) ? '사진' : '파일'} ${f.name} (${f.mime}, ${Math.max(1, Math.round(f.size / 1024))}KB)`);
 
 const asMember = (r: Record<string, unknown>): Member => ({
   id: String(r.user_id), email: String(r.email ?? ''), name: String(r.name ?? ''),
@@ -147,6 +214,7 @@ const asMessage = (r: Record<string, unknown>): Message => ({
   author_name: String(r.author_name ?? ''), author_kind: r.author_kind === 'ai' ? 'ai' : 'user',
   content: String(r.content ?? ''), created_at: String(iso(r.created_at) ?? ''),
   reply_count: Number(r.reply_count ?? 0),
+  attachments: readAttachments(r.attachments),
 });
 
 // ---------- 멤버 확인 (처음 로그인하면 등록) ----------
@@ -200,7 +268,7 @@ async function channelFor(sql: Sql, meId: string, channelId: number): Promise<Re
 }
 
 // ---------- 메시지 ----------
-const MSG_COLS = `m.id, m.channel_id, m.parent_id, m.user_id, m.author_name, m.author_kind, m.content, m.created_at,
+const MSG_COLS = `m.id, m.channel_id, m.parent_id, m.user_id, m.author_name, m.author_kind, m.content, m.attachments, m.created_at,
   (select count(*)::int from workspace.messages r where r.parent_id = m.id) as reply_count`;
 
 async function topMessages(sql: Sql, channelId: number): Promise<Message[]> {
@@ -246,17 +314,18 @@ async function threadMessages(sql: Sql, channelId: number, parentId: number): Pr
 async function contextTurns(sql: Sql, channelId: number, parentId: number | null): Promise<Turn[]> {
   const rows = parentId == null
     ? await sql.unsafe(
-      `select author_name, author_kind, content from workspace.messages
+      `select author_name, author_kind, content, attachments from workspace.messages
        where channel_id = $1 and parent_id is null order by id desc limit 12`, [channelId],
     ) as unknown as Record<string, unknown>[]
     : await sql.unsafe(
-      `select author_name, author_kind, content from workspace.messages
+      `select author_name, author_kind, content, attachments from workspace.messages
        where parent_id = $1 order by id desc limit 12`, [parentId],
     ) as unknown as Record<string, unknown>[];
   return rows.reverse().map((r) => ({
     author: String(r.author_name ?? ''),
     kind: r.author_kind === 'ai' ? 'ai' as const : 'user' as const,
     content: String(r.content ?? ''),
+    files: fileNotes(readAttachments(r.attachments)),
   }));
 }
 
@@ -293,7 +362,7 @@ async function notifyPush(sql: Sql, ch: Record<string, unknown>, m: Message) {
     const title = kind === 'channel'
       ? `#${String(ch.name)} · ${m.author_name}`
       : (kind === 'ai' ? 'Alter' : `${m.author_name} · DM`);
-    const body = m.content.replace(/\s+/g, ' ').slice(0, 160);
+    const body = pushBody(m);
     const out = await sendPush(sql, subs, { title, body, tag: `workspace-${cid}`, url: '/workspace/' });
     console.log(FN, 'push', kind, cid, JSON.stringify(out));
   } catch (e) {
@@ -301,9 +370,10 @@ async function notifyPush(sql: Sql, ch: Record<string, unknown>, m: Message) {
   }
 }
 
-async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, channelId: number, raw: string, parentId: number | null) {
+async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, channelId: number, raw: string, parentId: number | null, rawAttachments: unknown = null) {
   const content = String(raw ?? '').replace(/\r\n/g, '\n').trim();
-  if (!content) throw new HttpError(400, '메시지 내용을 적어 주세요.', 'empty');
+  const attachments = normAttachments(rawAttachments, me.id);
+  if (!content && !attachments.length) throw new HttpError(400, '메시지 내용을 적거나 사진·파일을 붙여 주세요.', 'empty');
   if (content.length > MAX_CONTENT) throw new HttpError(413, `메시지가 너무 깁니다 (${MAX_CONTENT}자까지).`, 'too_long');
 
   let threadRoot: number | null = null;
@@ -314,8 +384,8 @@ async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, ch
     threadRoot = p.parent_id == null ? Number(p.id) : Number(p.parent_id);
   }
 
-  const [row] = await sql`insert into ${sql(SCHEMA)}.messages (channel_id, parent_id, user_id, author_name, author_kind, content)
-    values (${channelId}, ${threadRoot}, ${me.id}, ${me.name || '선생님'}, ${'user'}, ${content}) returning *`;
+  const [row] = await sql`insert into ${sql(SCHEMA)}.messages (channel_id, parent_id, user_id, author_name, author_kind, content, attachments)
+    values (${channelId}, ${threadRoot}, ${me.id}, ${me.name || '선생님'}, ${'user'}, ${content}, ${sql.json(attachments)}) returning *`;
   const message = asMessage(row);
   bg(notifyPush(sql, ch, message));
 
@@ -327,7 +397,7 @@ async function postMessage(sql: Sql, me: Member, ch: Record<string, unknown>, ch
   const aiParent: number | null = threadRoot != null ? threadRoot : (kind === 'ai' ? null : message.id);
   const turns = await contextTurns(sql, channelId, threadRoot);
   const channelName = kind === 'channel' ? '#' + String(ch.name) : String(ch.name);
-  const res = await ask({ channel: channelName, turns, message: content });
+  const res = await ask({ channel: channelName, turns, message: content, files: fileNotes(attachments) });
   try {
     const [aiRow] = await sql`insert into ${sql(SCHEMA)}.messages (channel_id, parent_id, user_id, author_name, author_kind, content)
       values (${channelId}, ${aiParent}, ${null}, ${'Alter'}, ${'ai'}, ${res.text}) returning *`;
@@ -520,14 +590,14 @@ Deno.serve(async (req) => {
     if (path === '/messages' && req.method === 'POST') {
       const raw = await req.text();
       if (raw.length > 64_000) return json(req, 413, { error: '요청이 너무 큽니다.' });
-      let b: { channel_id?: unknown; content?: unknown; parent_id?: unknown };
+      let b: { channel_id?: unknown; content?: unknown; parent_id?: unknown; attachments?: unknown };
       try { b = JSON.parse(raw || '{}'); } catch { return json(req, 400, { error: 'JSON 형식이 아닙니다.' }); }
       const channelId = Number(b.channel_id);
       if (!Number.isInteger(channelId) || channelId <= 0) return json(req, 400, { error: 'channel_id 가 필요합니다.' });
       const parentRaw = b.parent_id == null ? null : Number(b.parent_id);
       if (parentRaw != null && (!Number.isInteger(parentRaw) || parentRaw <= 0)) return json(req, 400, { error: 'parent_id 가 올바르지 않습니다.' });
       const ch = await channelFor(sql, me.id, channelId);
-      const out = await postMessage(sql, me, ch, channelId, String(b.content ?? ''), parentRaw);
+      const out = await postMessage(sql, me, ch, channelId, String(b.content ?? ''), parentRaw, b.attachments);
       return json(req, 201, out);
     }
 

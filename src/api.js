@@ -45,9 +45,9 @@ export const liveApi = {
 
   thread: (channelId, parentId) => call(`/messages?channel_id=${q(channelId)}&parent_id=${q(parentId)}`),
 
-  post: ({ channelId, content, parentId }) => call('/messages', {
+  post: ({ channelId, content, parentId, attachments }) => call('/messages', {
     method: 'POST',
-    body: { channel_id: channelId, content, parent_id: parentId ?? null },
+    body: { channel_id: channelId, content, parent_id: parentId ?? null, attachments: attachments ?? [] },
   }),
 
   createChannel: ({ name, description }) => call('/channels', {

@@ -38,12 +38,29 @@ export const DDL: string[] = [
     user_id uuid,
     author_name text not null check (char_length(author_name) between 1 and 80),
     author_kind text not null default 'user' check (author_kind in ('user', 'ai')),
-    content text not null check (char_length(content) between 1 and 8000),
-    created_at timestamptz not null default now()
+    content text not null default '' check (char_length(content) <= 8000),
+    attachments jsonb not null default '[]'::jsonb,
+    created_at timestamptz not null default now(),
+    constraint messages_body_check check (char_length(content) > 0 or jsonb_array_length(attachments) > 0)
   )`,
 
   `create index if not exists messages_channel_idx on workspace.messages (channel_id, id)`,
   `create index if not exists messages_parent_idx on workspace.messages (parent_id, id) where parent_id is not null`,
+
+  // ---------- 사진·파일 첨부 (이미 있는 표에도 더한다) ----------
+  // 파일 자체는 Storage 버킷 'workspace' 에 <내 아이디>/<시각>-<무작위>.<확장자> 로 올리고,
+  // 여기에는 [{ path, name, mime, size }] 만 적는다 (한글 파일 이름은 여기에만, 경로에는 쓰지 않는다).
+  `alter table workspace.messages add column if not exists attachments jsonb not null default '[]'::jsonb`,
+  // 글 없이 사진·파일만 보내는 메시지를 위해 '1자 이상' 조건을 '0자 이상'으로 바꾼다 (내용은 함수가 확인)
+  `do $$ begin
+     alter table workspace.messages drop constraint if exists messages_content_check;
+   exception when others then null; end $$`,
+  `do $$ begin
+     alter table workspace.messages add constraint messages_content_check check (char_length(content) <= 8000);
+   exception when duplicate_object then null; when others then null; end $$`,
+  `do $$ begin
+     alter table workspace.messages add constraint messages_body_check check (char_length(content) > 0 or jsonb_array_length(attachments) > 0);
+   exception when duplicate_object then null; when others then null; end $$`,
 
   `create or replace function workspace.is_member() returns boolean
    language sql stable security definer set search_path = '' as $$
@@ -142,4 +159,6 @@ export const CHECK_TABLES = `select
   to_regclass('workspace.messages')           is not null as messages,
   to_regclass('workspace.push_subscriptions') is not null as push,
   to_regclass('workspace.push_config')        is not null as push_config,
-  to_regclass('workspace.channel_reads')      is not null as reads`;
+  to_regclass('workspace.channel_reads')      is not null as reads,
+  exists (select 1 from information_schema.columns
+     where table_schema = 'workspace' and table_name = 'messages' and column_name = 'attachments') as attachments`;

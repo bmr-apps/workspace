@@ -67,8 +67,19 @@ function unreadList() {
   return Object.entries(unreadState).map(([id, n]) => ({ channel_id: Number(id), unread: Number(n), last_id: 0 }));
 }
 
-function aiReply(text, channelName) {
+function aiReply(text, channelName, attachments = []) {
   const t = text.replace(/@\s?(ai|alter)/gi, '').trim();
+  const files = Array.isArray(attachments) ? attachments : [];
+  if (files.length && !t) {
+    const names = files.map((f) => f.name).join(', ');
+    return [
+      `첨부해 주신 **${files.length}개 파일**(${names})을 받았어요.`,
+      '',
+      '실제 워크스페이스에서는 사진·파일도 이 채널 사람들이 함께 보고 내려받을 수 있고, 저는 **파일 이름과 종류만** 알 수 있어(내용은 볼 수 없어요) 내용에 대한 설명은 글로 남겨 주시면 좋아요.',
+      '',
+      '지금은 **미리보기**라 예시로만 답하고 있어요. (미리보기 예시 답변)',
+    ].join('\n');
+  }
   const hello = /^(안녕|하이|hello|hi)/i.test(t);
   const askEval = /(평가|루브릭|채점|피드백)/.test(t);
   const askPlan = /(수업|차시|활동|아이디어|설계)/.test(t);
@@ -179,17 +190,23 @@ export const previewApi = {
     return { ok: true, channel_id: Number(channelId), last_read_id: 0 };
   },
 
-  async post({ channelId, content, parentId }) {
+  async post({ channelId, content, parentId, attachments }) {
     const ch = channelOf(channelId);
     if (!ch) throw new Error('없는 채널입니다.');
     const text = String(content || '').trim();
-    if (!text) throw new Error('메시지 내용을 적어 주세요.');
+    const atts = (Array.isArray(attachments) ? attachments : []).slice(0, 5).map((a) => ({
+      path: String(a.path || ''), name: String(a.name || '파일'),
+      mime: String(a.mime || 'application/octet-stream'), size: Number(a.size) || 0,
+      ...(a.url ? { url: a.url } : {}),
+    })).filter((a) => a.path);
+    if (!text && !atts.length) throw new Error('메시지 내용을 적거나 사진·파일을 붙여 주세요.');
     let root = null;
     if (parentId != null) root = findMessage(parentId) ? (findMessage(parentId).parent_id ?? Number(parentId)) : null;
 
     const msg = {
       id: ++seq, channel_id: Number(channelId), parent_id: root, user_id: ME.id,
-      author_name: ME.name, author_kind: 'user', content: text, created_at: iso(Date.now()), reply_count: 0,
+      author_name: ME.name, author_kind: 'user', content: text, attachments: atts,
+      created_at: iso(Date.now()), reply_count: 0,
     };
     db.messages.push(msg);
 
@@ -200,7 +217,7 @@ export const previewApi = {
     const aiParent = root != null ? root : (ch.kind === 'ai' ? null : msg.id);
     const ai = {
       id: ++seq, channel_id: Number(channelId), parent_id: aiParent, user_id: null,
-      author_name: 'Alter', author_kind: 'ai', content: aiReply(text, ch.kind === 'channel' ? '#' + ch.name : ch.name),
+      author_name: 'Alter', author_kind: 'ai', content: aiReply(text, ch.kind === 'channel' ? '#' + ch.name : ch.name, atts),
       created_at: iso(Date.now()), reply_count: 0, source: 'preview',
     };
     db.messages.push(ai);
