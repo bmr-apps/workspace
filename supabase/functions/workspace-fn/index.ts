@@ -81,15 +81,23 @@ async function getUser(req: Request): Promise<User | null> {
 
 // ---------- 표가 없으면 만들기 (콜드 스타트 1회) ----------
 let schemaReady: Promise<void> | null = null;
+type TableFlags = {
+  members?: boolean; channels?: boolean; messages?: boolean; push?: boolean;
+  push_config?: boolean; reads?: boolean; attachments?: boolean; attach_ok?: boolean; body_check?: boolean;
+};
+/** 표·칸·첨부 조건이 다 준비됐는가 (하나라도 빠지면 DDL 을 다시 건다) */
+const coreOk = (t: TableFlags) =>
+  Boolean(t.members && t.channels && t.messages && t.push && t.push_config && t.reads);
+const attachOk = (t: TableFlags) => Boolean(t.attachments && t.attach_ok && t.body_check);
+const schemaOk = (t: TableFlags) => coreOk(t) && attachOk(t);
 function ensureSchema(sql: Sql): Promise<void> {
   if (!schemaReady) {
     schemaReady = (async () => {
       const t0 = Date.now();
       let fresh = false;
       try {
-        const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean; reads?: boolean }[];
-        const t = rows?.[0] ?? {};
-        fresh = !(t.members && t.channels && t.messages && t.push && t.push_config && t.reads);
+        const rows = await sql.unsafe(CHECK_TABLES) as unknown as TableFlags[];
+        fresh = !schemaOk(rows?.[0] ?? {});
       } catch (e) {
         fresh = true;
         console.error(FN, 'check tables', (e as Error)?.message ?? e);
@@ -103,9 +111,11 @@ function ensureSchema(sql: Sql): Promise<void> {
       }
       try { await sql.unsafe(SEED_CHANNELS); } catch (e) { console.error(FN, 'seed', (e as Error)?.message ?? e); }
       // 마지막 확인: 핵심 표가 정말 있는지 (하나라도 없으면 이번 요청은 실패로 알린다)
-      const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean; reads?: boolean }[];
+      const rows = await sql.unsafe(CHECK_TABLES) as unknown as TableFlags[];
       const t = rows?.[0] ?? {};
-      if (!(t.members && t.channels && t.messages && t.push && t.push_config && t.reads)) throw new Error('표를 만들지 못했습니다');
+      if (!coreOk(t)) throw new Error('표를 만들지 못했습니다');
+      // 첨부 조건이 아직 안 맞아도 글 메시지는 그대로 쓸 수 있게 한다 (health 에 attach_ok 로 보임)
+      if (!attachOk(t)) console.error(FN, 'attachments not ready', JSON.stringify(t));
       console.log(FN, 'schema ready', Date.now() - t0, 'ms', fresh ? '(created)' : '(existing)');
     })().catch((e) => {
       schemaReady = null; // 다음 요청에서 다시 시도

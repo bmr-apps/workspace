@@ -23,10 +23,31 @@ comment on column workspace.messages.attachments is
 
 -- 글 없이 사진·파일만 보내는 메시지도 허용한다.
 -- (원래 inline 조건 char_length(content) between 1 and 8000 → 0자 이상으로 바꾸고,
---  '글이 있거나 첨부가 있거나'는 표 수준 조건으로 확인한다.)
-alter table workspace.messages drop constraint if exists messages_content_check;
-alter table workspace.messages
-  add constraint messages_content_check check (char_length(content) <= 8000);
-alter table workspace.messages drop constraint if exists messages_body_check;
-alter table workspace.messages
-  add constraint messages_body_check check (char_length(content) > 0 or jsonb_array_length(attachments) > 0);
+--  '글이 있거나 첨부가 있거나'는 표 수준 조건으로 확인한다. 조건 이름이 다를 수 있어
+--  정의를 보고 1자 이상을 요구하는 조건을 모두 지운 뒤 다시 건다.)
+do $$
+declare c record;
+begin
+  for c in select conname from pg_constraint
+            where conrelid = 'workspace.messages'::regclass and contype = 'c'
+              and pg_get_constraintdef(oid) like '%char_length(content)%'
+              and pg_get_constraintdef(oid) like '%>= 1%'
+  loop
+    execute format('alter table workspace.messages drop constraint %I', c.conname);
+  end loop;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_constraint
+     where conrelid = 'workspace.messages'::regclass and conname = 'messages_content_check') then
+    alter table workspace.messages add constraint messages_content_check check (char_length(content) <= 8000);
+  end if;
+end $$;
+
+do $$ begin
+  if not exists (select 1 from pg_constraint
+     where conrelid = 'workspace.messages'::regclass and conname = 'messages_body_check') then
+    alter table workspace.messages add constraint messages_body_check
+      check (char_length(content) > 0 or jsonb_array_length(attachments) > 0);
+  end if;
+end $$;

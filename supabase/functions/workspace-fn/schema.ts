@@ -51,16 +51,33 @@ export const DDL: string[] = [
   // 파일 자체는 Storage 버킷 'workspace' 에 <내 아이디>/<시각>-<무작위>.<확장자> 로 올리고,
   // 여기에는 [{ path, name, mime, size }] 만 적는다 (한글 파일 이름은 여기에만, 경로에는 쓰지 않는다).
   `alter table workspace.messages add column if not exists attachments jsonb not null default '[]'::jsonb`,
-  // 글 없이 사진·파일만 보내는 메시지를 위해 '1자 이상' 조건을 '0자 이상'으로 바꾼다 (내용은 함수가 확인)
+  // 글 없이 사진·파일만 보내는 메시지를 위해 '1자 이상' 조건을 '0자 이상'으로 바꾼다 (내용은 함수가 확인).
+  // 조건 이름이 다를 수 있으니 **정의를 보고** 1자 이상을 요구하는 조건을 모두 지운 뒤 새로 건다.
+  `do $$
+   declare c record;
+   begin
+     for c in select conname from pg_constraint
+               where conrelid = 'workspace.messages'::regclass and contype = 'c'
+                 and pg_get_constraintdef(oid) like '%char_length(content)%'
+                 and pg_get_constraintdef(oid) like '%>= 1%'
+     loop
+       execute format('alter table workspace.messages drop constraint %I', c.conname);
+     end loop;
+   end $$`,
   `do $$ begin
-     alter table workspace.messages drop constraint if exists messages_content_check;
-   exception when others then null; end $$`,
+     if not exists (select 1 from pg_constraint
+        where conrelid = 'workspace.messages'::regclass and conname = 'messages_content_check') then
+       alter table workspace.messages add constraint messages_content_check check (char_length(content) <= 8000);
+     end if;
+   end $$`,
   `do $$ begin
-     alter table workspace.messages add constraint messages_content_check check (char_length(content) <= 8000);
-   exception when duplicate_object then null; when others then null; end $$`,
-  `do $$ begin
-     alter table workspace.messages add constraint messages_body_check check (char_length(content) > 0 or jsonb_array_length(attachments) > 0);
-   exception when duplicate_object then null; when others then null; end $$`,
+     if not exists (select 1 from pg_constraint
+        where conrelid = 'workspace.messages'::regclass and conname = 'messages_body_check') then
+       alter table workspace.messages add constraint messages_body_check
+         check (char_length(content) > 0 or jsonb_array_length(attachments) > 0);
+     end if;
+   end $$`,
+  `comment on column workspace.messages.attachments is '첨부 목록 [{path,name,mime,size}]. path 는 Storage 버킷 workspace 안의 <올린 사람 아이디>/… 경로(영문), name 은 원래 파일 이름.'`,
 
   `create or replace function workspace.is_member() returns boolean
    language sql stable security definer set search_path = '' as $$
@@ -161,4 +178,10 @@ export const CHECK_TABLES = `select
   to_regclass('workspace.push_config')        is not null as push_config,
   to_regclass('workspace.channel_reads')      is not null as reads,
   exists (select 1 from information_schema.columns
-     where table_schema = 'workspace' and table_name = 'messages' and column_name = 'attachments') as attachments`;
+     where table_schema = 'workspace' and table_name = 'messages' and column_name = 'attachments') as attachments,
+  not exists (select 1 from pg_constraint
+     where conrelid = 'workspace.messages'::regclass and contype = 'c'
+       and pg_get_constraintdef(oid) like '%char_length(content)%'
+       and pg_get_constraintdef(oid) like '%>= 1%') as attach_ok,
+  exists (select 1 from pg_constraint
+     where conrelid = 'workspace.messages'::regclass and conname = 'messages_body_check') as body_check`;
