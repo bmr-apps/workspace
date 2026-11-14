@@ -170,6 +170,28 @@ export const DDL: string[] = [
   `alter table workspace.bot_tokens enable row level security`,
   `revoke all on workspace.bot_tokens from anon, authenticated`,
 
+  // ---------- 관리자 콘솔 (멤버 차단 · 외부 초대 · 공지 고정) ----------
+  // 화면 오른쪽 위 🛠️ 관리 에서 씁니다. 마이그레이션 202611150001_workspace_admin.sql 과 같은 내용입니다.
+  `alter table workspace.members add column if not exists disabled_at timestamptz`,
+  `comment on column workspace.members.disabled_at is '관리자가 접근을 막은 시각. 값이 있으면 함수가 403 으로 돌려보냅니다. 비우면 다시 들어올 수 있습니다.'`,
+  // 바깥 선생님·강사는 이 표에 미리 넣어 두면 그 구글 계정으로 처음 로그인할 때 멤버가 됩니다 (한 번 쓰면 지움).
+  `create table if not exists workspace.invites (
+    email text primary key check (email = lower(email) and char_length(email) between 3 and 200),
+    name text not null default '' check (char_length(name) <= 40),
+    role text not null default 'member' check (role in ('member', 'admin')),
+    invited_by uuid,
+    created_at timestamptz not null default now()
+  )`,
+  `comment on table workspace.invites is '관리자가 미리 초대한 메일. 이 메일로 처음 로그인하면 workspace.members 에 초대한 역할로 등록하고 이 줄을 지웁니다.'`,
+  // 초대 목록은 관리자 화면(함수)만 읽습니다 — 브라우저에는 권한을 주지 않는다.
+  `alter table workspace.invites enable row level security`,
+  `revoke all on workspace.invites from anon, authenticated`,
+  // 공지 고정: 그 메시지가 지워지면 자동으로 비워진다 (on delete set null)
+  `alter table workspace.channels
+     add column if not exists pinned_message_id bigint references workspace.messages(id) on delete set null`,
+  `comment on column workspace.channels.pinned_message_id is '채널 위에 공지로 고정한 메시지. 지워지면 자동으로 비워집니다. 공개 채널(kind=channel)만 씁니다.'`,
+  `create index if not exists channels_pinned_idx on workspace.channels (pinned_message_id) where pinned_message_id is not null`,
+
   // 실시간 구독용 (프로젝트 설정에 따라 권한이 없을 수 있음 — 실패해도 앱은 폴링으로 동작)
   `do $$ begin
      alter publication supabase_realtime add table workspace.messages;
@@ -202,4 +224,9 @@ export const CHECK_TABLES = `select
        and pg_get_constraintdef(oid) like '%>= 1%') as attach_ok,
   exists (select 1 from pg_constraint
      where conrelid = 'workspace.messages'::regclass and conname = 'messages_body_check') as body_check,
-  to_regclass('workspace.bot_tokens') is not null as bot_tokens`;
+  to_regclass('workspace.bot_tokens') is not null as bot_tokens,
+  exists (select 1 from information_schema.columns
+     where table_schema = 'workspace' and table_name = 'members' and column_name = 'disabled_at') as member_disabled,
+  to_regclass('workspace.invites') is not null as invites,
+  exists (select 1 from information_schema.columns
+     where table_schema = 'workspace' and table_name = 'channels' and column_name = 'pinned_message_id') as channel_pin`;

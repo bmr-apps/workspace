@@ -5,8 +5,15 @@
 //   GET  /hello                                   부른 사람, AI 열쇠 설정 여부
 //   GET  /bootstrap                               나·멤버·채널 목록 (기본 채널과 내 AI 방을 만들어 줌)
 //   POST /channels      {kind:'channel', name, description} | {kind:'dm', target_user_id}
-//   GET  /messages?channel_id=…[&parent_id=…]     채널 메시지 / 스레드 답글 (attachments 포함)
+//   GET  /messages?channel_id=…[&parent_id=…]     채널 메시지 / 스레드 답글 (attachments 포함) + 채널(공지 고정)
 //   POST /messages      {channel_id, content, parent_id?, attachments?}  메시지 쓰기 (+ @AI 면 Alter 답글)
+//
+// 관리자 콘솔 (자세한 것은 admin.ts):
+//   GET  /admin/overview · GET /admin/members · POST /admin/invites · DELETE /admin/invites/:email
+//   POST /admin/members/update {user_id, role?, disabled?}    관리자 지정·해제 · 차단·해제
+//   POST /channels/update · DELETE /channels/:id              공개 채널 이름·설명 고치기 · 지우기
+//   POST /messages/pin {channel_id, message_id|null}          공지 고정·해제
+//   DELETE /messages/:id                                      메시지 지우기 (쓴 사람 또는 관리자)
 //
 // 봇 연동 (자세한 것은 bot.ts):
 //   GET  /bot/channels · GET|POST /bot/messages · GET /bot/search   (열쇠: Authorization: Bearer bmrws_…)
@@ -21,6 +28,8 @@
 // 그래서 누가 무엇을 볼 수 있는지는 이 파일에서 직접 확인합니다 (memberFor / channelFor).
 // 비밀값: WORKSPACE_DB_URL, WORKSPACE_GEMINI_API_KEY, WORKSPACE_GEMINI_MODEL(선택)
 import postgres from 'npm:postgres@3.4.5';
+import { HttpError } from './http.ts';
+import { adminRoute } from './admin.ts';
 import { DDL, SEED_CHANNELS, CHECK_TABLES } from './schema.ts';
 import { ask, hasKey as aiHasKey, currentModel, lastAiResult, type Turn } from './ai.ts';
 import { getVapid, pushAvailable, sendPush } from './push.ts';
@@ -33,6 +42,7 @@ const FN = 'workspace-fn';
 const SCHEMA = 'workspace';
 const PREFIX = 'WORKSPACE_';
 const ORIGINS = ['https://apps.bmrschool.net', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'];
+const METHODS = 'GET, POST, PATCH, DELETE, OPTIONS';
 // 봇 API·MCP 는 화면이 아니라 바깥 도구(서버·데스크톱 앱)가 부른다 — 출처를 가리지 않고 열쇠로만 가린다
 const OPEN_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -53,7 +63,7 @@ function cors(req: Request): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': ORIGINS.includes(o) ? o : ORIGINS[0],
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': METHODS,
     'Access-Control-Max-Age': '600', Vary: 'Origin',
   };
 }
@@ -72,11 +82,6 @@ const jsonOpen = (status: number, body: unknown, headers: Record<string, string>
       'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers,
     },
   });
-
-class HttpError extends Error {
-  status: number; code: string;
-  constructor(status: number, message: string, code = '') { super(message); this.status = status; this.code = code || String(status); }
-}
 
 // ---------- 로그인한 사람 ----------
 type User = { id: string; email: string; name: string; confirmed: boolean };
@@ -111,14 +116,16 @@ let schemaReady: Promise<void> | null = null;
 type TableFlags = {
   members?: boolean; channels?: boolean; messages?: boolean; push?: boolean;
   push_config?: boolean; reads?: boolean; attachments?: boolean; attach_ok?: boolean; body_check?: boolean;
-  bot_tokens?: boolean;
+  bot_tokens?: boolean; member_disabled?: boolean; invites?: boolean; channel_pin?: boolean;
 };
 /** 표·칸·첨부 조건이 다 준비됐는가 (하나라도 빠지면 DDL 을 다시 건다) */
 const coreOk = (t: TableFlags) =>
   Boolean(t.members && t.channels && t.messages && t.push && t.push_config && t.reads);
 const attachOk = (t: TableFlags) => Boolean(t.attachments && t.attach_ok && t.body_check);
 const botOk = (t: TableFlags) => Boolean(t.bot_tokens);
-const schemaOk = (t: TableFlags) => coreOk(t) && attachOk(t) && botOk(t);
+/** 관리자 콘솔에 필요한 칸·표 (차단 · 초대 · 공지 고정) */
+const adminOk = (t: TableFlags) => Boolean(t.member_disabled && t.invites && t.channel_pin);
+const schemaOk = (t: TableFlags) => coreOk(t) && attachOk(t) && botOk(t) && adminOk(t);
 function ensureSchema(sql: Sql): Promise<void> {
   if (!schemaReady) {
     schemaReady = (async () => {
@@ -147,6 +154,8 @@ function ensureSchema(sql: Sql): Promise<void> {
       if (!attachOk(t)) console.error(FN, 'attachments not ready', JSON.stringify(t));
       // 봇·MCP 열쇠 표가 없으면 연동 기능만 쉰다 (나머지 화면은 그대로)
       if (!botOk(t)) console.error(FN, 'bot tokens not ready', JSON.stringify(t));
+      // 관리자 콘솔 칸(차단·초대·공지 고정)이 없으면 관리 화면만 쉰다
+      if (!adminOk(t)) console.error(FN, 'admin columns not ready', JSON.stringify(t));
       console.log(FN, 'schema ready', Date.now() - t0, 'ms', fresh ? '(created)' : '(existing)');
     })().catch((e) => {
       schemaReady = null; // 다음 요청에서 다시 시도
@@ -165,8 +174,15 @@ function colorFor(seed: string): string {
   return COLORS[h % COLORS.length];
 }
 
-type Member = { id: string; email: string; name: string; role: 'member' | 'admin'; avatar_color: string; last_seen_at: string | null };
-type Channel = { id: number; slug: string | null; name: string; kind: 'channel' | 'dm' | 'ai'; description: string; dm_key: string | null; created_at: string; unread: number };
+type Member = {
+  id: string; email: string; name: string; role: 'member' | 'admin';
+  avatar_color: string; last_seen_at: string | null; disabled_at: string | null;
+};
+type Channel = {
+  id: number; slug: string | null; name: string; kind: 'channel' | 'dm' | 'ai'; description: string;
+  dm_key: string | null; created_at: string; unread: number;
+  pinned_message_id: number | null; pinned_message: Message | null;
+};
 type Attachment = { path: string; name: string; mime: string; size: number };
 type Message = {
   id: number; channel_id: number; parent_id: number | null; user_id: string | null;
@@ -240,6 +256,7 @@ const asMember = (r: Record<string, unknown>): Member => ({
   role: r.role === 'admin' ? 'admin' : 'member',
   avatar_color: String(r.avatar_color || colorFor(String(r.user_id))),
   last_seen_at: iso(r.last_seen_at),
+  disabled_at: iso(r.disabled_at),
 });
 const asChannel = (r: Record<string, unknown>): Channel => ({
   id: Number(r.id), slug: r.slug == null ? null : String(r.slug), name: String(r.name),
@@ -247,6 +264,8 @@ const asChannel = (r: Record<string, unknown>): Channel => ({
   description: String(r.description ?? ''), dm_key: r.dm_key == null ? null : String(r.dm_key),
   created_at: String(iso(r.created_at) ?? ''),
   unread: Number(r.unread_count ?? 0),
+  pinned_message_id: r.pinned_message_id == null ? null : Number(r.pinned_message_id),
+  pinned_message: null,
 });
 const asMessage = (r: Record<string, unknown>): Message => ({
   id: Number(r.id), channel_id: Number(r.channel_id),
@@ -262,6 +281,10 @@ const asMessage = (r: Record<string, unknown>): Message => ({
 async function memberFor(sql: Sql, u: User): Promise<Member> {
   const [found] = await sql`select * from ${sql(SCHEMA)}.members where user_id = ${u.id}`;
   if (found) {
+    // 관리자가 차단한 계정 — 로그인은 되어도 이 앱은 열리지 않는다
+    if (found.disabled_at != null) {
+      throw new HttpError(403, '관리자에 의해 접근이 제한된 계정입니다. 관리자에게 문의해 주세요.', 'disabled');
+    }
     const name = u.name && u.name !== found.name ? u.name : String(found.name ?? '');
     const [row] = await sql`update ${sql(SCHEMA)}.members
       set last_seen_at = now(), name = ${name || String(found.name ?? '')}, email = ${u.email}
@@ -272,15 +295,23 @@ async function memberFor(sql: Sql, u: User): Promise<Member> {
 
   const [{ n }] = await sql`select count(*)::int as n from ${sql(SCHEMA)}.members` as unknown as { n: number }[];
   const school = /@(bmrschool\.(org|net))$/i.test(u.email);
-  if (n > 0 && !school) {
-    throw new HttpError(403, '이 워크스페이스에 아직 초대되지 않은 계정입니다. 관리자에게 멤버 등록을 요청해 주세요.', 'not_invited');
+  // 관리자가 미리 넣어 둔 초대 — 학교 메일이 아니어도 이 줄이 있으면 들어올 수 있다 (역할·이름도 초대한 대로)
+  const [invite] = await sql`select name, role from ${sql(SCHEMA)}.invites where email = ${u.email}`;
+  if (n > 0 && !school && !invite) {
+    throw new HttpError(403, '이 워크스페이스에 아직 초대되지 않은 계정입니다. 관리자에게 초대를 요청해 주세요.', 'not_invited');
   }
-  const role = n === 0 ? 'admin' : 'member';
-  const name = u.name || u.email.split('@')[0] || '선생님';
+  const role = invite ? (invite.role === 'admin' ? 'admin' : 'member') : (n === 0 ? 'admin' : 'member');
+  const name = (u.name || String(invite?.name ?? '') || u.email.split('@')[0] || '선생님').slice(0, 40);
   const [row] = await sql`insert into ${sql(SCHEMA)}.members (user_id, email, name, role, avatar_color, last_seen_at)
     values (${u.id}, ${u.email}, ${name}, ${role}, ${colorFor(u.id)}, now())
     on conflict (user_id) do update set last_seen_at = now(), name = excluded.name, email = excluded.email
     returning *`;
+  // 초대는 한 번만 — 등록되면 지운다 (같은 메일로 다시 들어와도 이제는 멤버)
+  if (invite) {
+    try { await sql`delete from ${sql(SCHEMA)}.invites where email = ${u.email}`; }
+    catch (e) { console.error(FN, 'invite cleanup', (e as Error)?.message ?? e); }
+  }
+  console.log(FN, 'member registered', invite ? '(invited)' : school ? '(school)' : '(first)', role);
   return asMember(row);
 }
 
@@ -311,6 +342,23 @@ async function channelFor(sql: Sql, meId: string, channelId: number): Promise<Re
 // ---------- 메시지 ----------
 const MSG_COLS = `m.id, m.channel_id, m.parent_id, m.user_id, m.author_name, m.author_kind, m.content, m.attachments, m.created_at,
   (select count(*)::int from workspace.messages r where r.parent_id = m.id) as reply_count`;
+
+/** 채널들의 공지로 고정한 메시지를 한 번에 채운다 (표는 한 번만 읽는다) */
+async function attachPins(sql: Sql, channels: Channel[]): Promise<Channel[]> {
+  const ids = [...new Set(channels.map((c) => c.pinned_message_id).filter((v): v is number => typeof v === 'number' && v > 0))];
+  if (!ids.length) return channels;
+  const holes = ids.map((_, i) => '$' + (i + 1)).join(',');
+  const rows = await sql.unsafe(
+    `select ${MSG_COLS} from workspace.messages m where m.id in (${holes})`,
+    ids,
+  ) as unknown as Record<string, unknown>[];
+  const byId = new Map<number, Message>();
+  for (const r of rows) { const m = asMessage(r); byId.set(m.id, m); }
+  for (const c of channels) {
+    c.pinned_message = c.pinned_message_id == null ? null : (byId.get(c.pinned_message_id) ?? null);
+  }
+  return channels;
+}
 
 async function topMessages(sql: Sql, channelId: number): Promise<Message[]> {
   const rows = await sql.unsafe(
@@ -481,7 +529,12 @@ Deno.serve(async (req) => {
           (select exists (select 1 from pg_constraint c
              where c.conrelid = 'workspace.messages'::regclass
                and c.conname = 'messages_content_check'
-               and pg_get_constraintdef(c.oid) not like '%>= 1%')) as attach_ok`) as unknown as { channels: number; members: number; messages: number; push_subs: number; attach_ok: boolean }[];
+               and pg_get_constraintdef(c.oid) not like '%>= 1%')) as attach_ok,
+          (select exists (select 1 from information_schema.columns
+             where table_schema = 'workspace' and table_name = 'members' and column_name = 'disabled_at')
+            and to_regclass('workspace.invites') is not null
+            and exists (select 1 from information_schema.columns
+             where table_schema = 'workspace' and table_name = 'channels' and column_name = 'pinned_message_id')) as admin_ready`) as unknown as { channels: number; members: number; messages: number; push_subs: number; attach_ok: boolean; admin_ready: boolean }[];
         counts = rows?.[0] ?? null;
         schema = true;
       } catch (e) {
@@ -599,11 +652,16 @@ Deno.serve(async (req) => {
     if (!user) return json(req, 401, { error: '로그인이 필요합니다. 다시 로그인해 주세요.' });
     const me = await memberFor(sql, user);
 
+    // ---------- 관리자 콘솔 (admin.ts) — 멤버·초대 · 채널 · 공지 고정 · 메시지 지우기 ----------
+    // 메시지 지우기만은 쓴 사람도 할 수 있어서 admin.ts 안에서 따로 권한을 본다.
+    const adminReply = await adminRoute(sql, req, path, me);
+    if (adminReply) return json(req, adminReply.status, adminReply.body);
+
     if (path === '/bootstrap' && req.method === 'GET') {
       await ensureAiChannel(sql, me);
-      const memberRows = await sql`select user_id, email, name, role, avatar_color, last_seen_at
+      const memberRows = await sql`select user_id, email, name, role, avatar_color, disabled_at, last_seen_at
         from ${sql(SCHEMA)}.members order by name asc, email asc limit 300`;
-      const channelRows = await sql`select c.id, c.slug, c.name, c.kind, c.description, c.dm_key, c.created_at,
+      const channelRows = await sql`select c.id, c.slug, c.name, c.kind, c.description, c.dm_key, c.created_at, c.pinned_message_id,
           (select count(*)::int from ${sql(SCHEMA)}.messages m
             where m.channel_id = c.id and m.id > coalesce(r.last_read_id, 0)
               and (m.user_id is null or m.user_id <> ${me.id})) as unread_count
@@ -615,7 +673,7 @@ Deno.serve(async (req) => {
       return json(req, 200, {
         me,
         members: (memberRows as Record<string, unknown>[]).map(asMember),
-        channels: (channelRows as Record<string, unknown>[]).map(asChannel),
+        channels: await attachPins(sql, (channelRows as Record<string, unknown>[]).map(asChannel)),
         gemini_key_set: aiHasKey(),
       });
     }
@@ -717,16 +775,17 @@ Deno.serve(async (req) => {
       const q = new URL(req.url).searchParams;
       const channelId = Number(q.get('channel_id'));
       if (!Number.isInteger(channelId) || channelId <= 0) return json(req, 400, { error: 'channel_id 가 필요합니다.' });
-      await channelFor(sql, me.id, channelId);
+      const ch = await channelFor(sql, me.id, channelId);
+      const [channel] = await attachPins(sql, [asChannel(ch)]);
       const parent = q.get('parent_id');
       if (parent) {
         const parentId = Number(parent);
         if (!Number.isInteger(parentId) || parentId <= 0) return json(req, 400, { error: 'parent_id 가 올바르지 않습니다.' });
         const t = await threadMessages(sql, channelId, parentId);
-        return json(req, 200, { channel_id: channelId, parent: t.parent, messages: t.replies, unread: await unreadFor(sql, me.id) });
+        return json(req, 200, { channel_id: channelId, channel, parent: t.parent, messages: t.replies, unread: await unreadFor(sql, me.id) });
       }
       const messages = await topMessages(sql, channelId);
-      return json(req, 200, { channel_id: channelId, messages, unread: await unreadFor(sql, me.id) });
+      return json(req, 200, { channel_id: channelId, channel, messages, unread: await unreadFor(sql, me.id) });
     }
 
     if (path === '/messages' && req.method === 'POST') {

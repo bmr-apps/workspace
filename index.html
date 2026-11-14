@@ -30,7 +30,7 @@
     <span id="conn" class="conn" hidden><i></i><span id="conn-text">연결됨</span></span>
     <span id="who" class="who" hidden></span>
     <button id="bell" class="btn ghost small bell" type="button" aria-pressed="false" title="새 메시지 알림" hidden>🔔 알림</button>
-    <button id="link-admin" class="btn ghost small link-btn" type="button" title="봇·MCP 연동 열쇠" aria-haspopup="dialog" hidden>🔑 연동</button>
+    <button id="admin-open" class="btn ghost small link-btn" type="button" title="멤버·채널·연동 관리" aria-haspopup="dialog" hidden>🛠️ 관리</button>
     <button id="logout" class="btn ghost small" type="button" hidden>로그아웃</button>
     <button id="open-sidebar" class="btn icon mobile-only" type="button" aria-label="채널 목록 열기" aria-controls="sidebar" aria-expanded="false" hidden>
       <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2.5" fill="none"></path></svg>
@@ -137,6 +137,18 @@
       </div>
     </header>
 
+    <!-- 공지 고정 — 채널 위에 붙어 있는 공지 (관리자가 고정, 모두가 본다) -->
+    <div id="pin-banner" class="pin-banner" hidden>
+      <button id="pin-jump" class="pin-jump" type="button" title="이 공지로 이동">
+        <span class="pin-ico" aria-hidden="true">📌</span>
+        <span class="pin-body">
+          <b id="pin-who"></b>
+          <span id="pin-text"></span>
+        </span>
+      </button>
+      <button id="pin-clear" class="btn ghost small pin-clear" type="button" title="공지 고정 해제" hidden>고정 해제</button>
+    </div>
+
     <!-- 음성·화상 회의(허들) — 메시지를 보면서 함께 이야기한다 -->
     <section id="huddle" class="huddle" aria-label="음성·화상 회의" hidden>
       <div class="huddle-head">
@@ -215,53 +227,105 @@
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<!-- 연동 열쇠 · MCP 설정 (관리자만) -->
-<div id="link-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="link-title" hidden>
-  <div class="modal-card">
+<!-- 관리자 콘솔 (🛠️ 관리 — 관리자만) -->
+<div id="admin-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="admin-title" hidden>
+  <div class="modal-card admin-card">
     <header class="modal-head">
-      <h2 id="link-title">🔑 연동 열쇠 · MCP</h2>
-      <button id="link-close" class="btn ghost icon" type="button" aria-label="닫기">✕</button>
+      <h2 id="admin-title">🛠️ 관리자 콘솔</h2>
+      <button id="admin-close" class="btn ghost icon" type="button" aria-label="닫기">✕</button>
     </header>
+    <div class="admin-tabs" role="tablist" aria-label="관리 항목">
+      <button class="admin-tab on" id="tab-members" type="button" role="tab" data-tab="members" aria-selected="true" aria-controls="admin-panel-members">👥 멤버·초대</button>
+      <button class="admin-tab" id="tab-channels" type="button" role="tab" data-tab="channels" aria-selected="false" aria-controls="admin-panel-channels">💬 채널 관리</button>
+      <button class="admin-tab" id="tab-system" type="button" role="tab" data-tab="system" aria-selected="false" aria-controls="admin-panel-system">🔑 연동·시스템</button>
+    </div>
     <div class="modal-body">
-      <p class="modal-lead">Alter(피클)이나 Cursor 같은 도구가 이 워크스페이스의 <b>공개 채널</b>을 읽고 글을 쓸 수 있게 열쇠를 발급합니다. <b>DM · 개인 AI 방은 열리지 않습니다.</b></p>
-      <p id="link-note" class="modal-note" hidden></p>
+      <!-- 1. 멤버 · 초대 -->
+      <section id="admin-panel-members" class="admin-panel" role="tabpanel" aria-labelledby="tab-members">
+        <section class="link-sec">
+          <h3>새 멤버 초대</h3>
+          <form id="invite-form" class="invite-form">
+            <div class="invite-row">
+              <label class="sr" for="invite-email">이메일</label>
+              <input id="invite-email" type="email" maxlength="200" placeholder="예: teacher@gmail.com" autocomplete="off" required>
+              <label class="sr" for="invite-name">이름</label>
+              <input id="invite-name" maxlength="40" placeholder="이름 (선택)" autocomplete="off">
+            </div>
+            <div class="invite-row">
+              <label class="sr" for="invite-role">역할</label>
+              <select id="invite-role">
+                <option value="member" selected>멤버</option>
+                <option value="admin">관리자</option>
+              </select>
+              <button class="btn" type="submit" id="invite-btn">초대 등록</button>
+            </div>
+          </form>
+          <p id="invite-note" class="modal-note" hidden></p>
+          <p class="modal-tiny">초대 메일은 따로 보내지 않아요. 그분이 <b>이 메일의 구글 계정</b>으로 로그인하면 바로 들어오고, 초대는 한 번 쓰고 지워집니다. 학교 메일(<code>@bmrschool.org</code> · <code>@bmrschool.net</code>)은 초대 없이도 들어옵니다.</p>
+        </section>
+        <section class="link-sec">
+          <h3>대기 중인 초대</h3>
+          <div id="invite-list" class="admin-list"></div>
+        </section>
+        <section class="link-sec">
+          <h3>멤버</h3>
+          <div id="admin-member-list" class="admin-list"></div>
+        </section>
+      </section>
 
-      <section class="link-sec">
-        <h3>새 열쇠 발급</h3>
-        <form id="token-form" class="link-form">
-          <label class="sr" for="token-name">열쇠 이름</label>
-          <input id="token-name" maxlength="60" placeholder="예: 피클 (Alter), Cursor MCP" autocomplete="off" required>
-          <button class="btn" type="submit" id="token-issue">발급</button>
-        </form>
-        <div id="token-new" class="token-new" hidden>
-          <p class="token-warn">⚠️ 이 열쇠는 <b>지금 한 번만</b> 보입니다. 복사해서 안전한 곳에 두세요.</p>
-          <div class="copy-row">
-            <code id="token-value" class="token-value"></code>
-            <button id="token-copy" class="btn small" type="button">복사</button>
+      <!-- 2. 채널 관리 -->
+      <section id="admin-panel-channels" class="admin-panel" role="tabpanel" aria-labelledby="tab-channels" hidden>
+        <p class="modal-lead">공개 채널의 이름·설명을 고치거나 채널을 지웁니다. <b>#일반</b>은 기본 채널이라 지울 수 없어요. DM·AI 방은 이 목록에 나오지 않습니다.</p>
+        <div id="admin-channel-list" class="admin-list"></div>
+      </section>
+
+      <!-- 3. 연동 · 시스템 -->
+      <section id="admin-panel-system" class="admin-panel" role="tabpanel" aria-labelledby="tab-system" hidden>
+        <p id="admin-note" class="modal-note" hidden></p>
+        <section class="link-sec">
+          <h3>시스템 현황</h3>
+          <div id="sys-cards" class="sys-cards"></div>
+          <p class="modal-tiny">관리 화면을 열 때마다 새로 읽습니다. 열쇠·비밀번호 같은 값은 여기에 보이지 않아요.</p>
+        </section>
+
+        <section class="link-sec">
+          <h3>새 연동 열쇠 발급</h3>
+          <p class="modal-lead">Alter(피클)이나 Cursor 같은 도구가 이 워크스페이스의 <b>공개 채널</b>을 읽고 글을 쓸 수 있게 열쇠를 발급합니다. <b>DM · 개인 AI 방은 열리지 않습니다.</b></p>
+          <form id="token-form" class="link-form">
+            <label class="sr" for="token-name">열쇠 이름</label>
+            <input id="token-name" maxlength="60" placeholder="예: 피클 (Alter), Cursor MCP" autocomplete="off" required>
+            <button class="btn" type="submit" id="token-issue">발급</button>
+          </form>
+          <div id="token-new" class="token-new" hidden>
+            <p class="token-warn">⚠️ 이 열쇠는 <b>지금 한 번만</b> 보입니다. 복사해서 안전한 곳에 두세요.</p>
+            <div class="copy-row">
+              <code id="token-value" class="token-value"></code>
+              <button id="token-copy" class="btn small" type="button">복사</button>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="link-sec">
-        <h3>MCP 서버 주소</h3>
-        <div class="copy-row">
-          <code id="mcp-url" class="token-value"></code>
-          <button id="mcp-url-copy" class="btn small ghost" type="button">복사</button>
-        </div>
-        <h3>MCP 설정 (Cursor · Claude Desktop)</h3>
-        <pre id="mcp-json" class="mcp-json"></pre>
-        <div class="copy-row"><button id="mcp-json-copy" class="btn small ghost" type="button">설정 복사</button></div>
-        <p class="modal-tiny">Cursor 는 <code>.cursor/mcp.json</code> 에 그대로 붙여 넣으면 됩니다. Claude Desktop 은 원격 주소를 바로 붙이지 못해 command 에 <code>npx -y mcp-remote &lt;주소&gt; --header "Authorization: Bearer &lt;열쇠&gt;"</code> 를 넣습니다.</p>
-      </section>
+        <section class="link-sec">
+          <h3>MCP 서버 주소</h3>
+          <div class="copy-row">
+            <code id="mcp-url" class="token-value"></code>
+            <button id="mcp-url-copy" class="btn small ghost" type="button">복사</button>
+          </div>
+          <h3>MCP 설정 (Cursor · Claude Desktop)</h3>
+          <pre id="mcp-json" class="mcp-json"></pre>
+          <div class="copy-row"><button id="mcp-json-copy" class="btn small ghost" type="button">설정 복사</button></div>
+          <p class="modal-tiny">Cursor 는 <code>.cursor/mcp.json</code> 에 그대로 붙여 넣으면 됩니다. Claude Desktop 은 원격 주소를 바로 붙이지 못해 command 에 <code>npx -y mcp-remote &lt;주소&gt; --header "Authorization: Bearer &lt;열쇠&gt;"</code> 를 넣습니다.</p>
+        </section>
 
-      <section class="link-sec">
-        <h3>발급된 열쇠</h3>
-        <div id="token-list" class="token-list"></div>
-      </section>
+        <section class="link-sec">
+          <h3>발급된 열쇠</h3>
+          <div id="token-list" class="token-list"></div>
+        </section>
 
-      <section class="link-sec">
-        <h3>봇 REST API</h3>
-        <p class="modal-tiny">같은 열쇠로 <code>/bot/channels</code> · <code>/bot/messages</code>(GET·POST) · <code>/bot/search</code> 도 부를 수 있습니다. 모두 공개 채널만 다룹니다.</p>
+        <section class="link-sec">
+          <h3>봇 REST API</h3>
+          <p class="modal-tiny">같은 열쇠로 <code>/bot/channels</code> · <code>/bot/messages</code>(GET·POST) · <code>/bot/search</code> 도 부를 수 있습니다. 모두 공개 채널만 다룹니다.</p>
+        </section>
       </section>
     </div>
   </div>

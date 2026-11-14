@@ -102,4 +102,36 @@ export const liveApi = {
   }),
 
   revokeBotToken: (id) => call(`/bot/tokens/${q(id)}`, { method: 'DELETE' }),
+
+  // ---------- 관리자 콘솔 (🛠️ 관리) ----------
+  adminOverview: () => call('/admin/overview'),
+
+  adminMembers: () => call('/admin/members'),
+
+  inviteMember: ({ email, name, role }) => call('/admin/invites', {
+    method: 'POST',
+    body: { email, name, role },
+  }),
+
+  removeInvite: (email) => call(`/admin/invites/${q(email)}`, { method: 'DELETE' }),
+
+  updateMember: ({ userId, role, disabled }) => call('/admin/members/update', {
+    method: 'POST',
+    body: { user_id: userId, role, disabled },
+  }),
+
+  updateChannel: ({ channelId, name, description }) => call('/channels/update', {
+    method: 'POST',
+    body: { channel_id: channelId, name, description },
+  }),
+
+  deleteChannel: (channelId) => call(`/channels/${q(channelId)}`, { method: 'DELETE' }),
+
+  // 공지 고정 (messageId 가 null 이면 해제)
+  pinMessage: ({ channelId, messageId }) => call('/messages/pin', {
+    method: 'POST',
+    body: { channel_id: channelId, message_id: messageId ?? null },
+  }),
+
+  deleteMessage: (messageId) => call(`/messages/${q(messageId)}`, { method: 'DELETE' }),
 };

@@ -507,3 +507,118 @@ a { color: inherit; }
   .top-right .btn.small { padding: 3px 7px; font-size: 11px; }
   .btn.icon { min-height: 34px; width: 34px; }
 }
+
+/* ---------- 공지 고정 띠 (채널 머리 아래) ---------- */
+.pin-banner {
+  flex: none; display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+  border-bottom: var(--border); background: var(--yellow-light);
+}
+.pin-jump {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 3px 4px;
+  border: 1.5px solid transparent; background: transparent; text-align: left; cursor: pointer;
+}
+.pin-jump:hover { background: #fff; border-color: #000; }
+.pin-ico {
+  flex: none; width: 26px; height: 26px; display: grid; place-items: center;
+  background: var(--yellow); border: 1.5px solid #000; font-size: 13px;
+}
+.pin-body { min-width: 0; display: block; line-height: 1.3; }
+.pin-body b { display: block; font-size: 11.5px; font-weight: 900; }
+.pin-body span { display: block; font-size: 12.5px; font-weight: 650; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin-clear { flex: none; }
+
+/* ---------- 메시지 잡기 (고정·삭제) ---------- */
+.msg { position: relative; }
+.msg-acts {
+  position: absolute; top: 1px; right: 8px; z-index: 5; display: none; gap: 4px;
+  padding: 2px; background: #fff; border: 1.5px solid #000;
+}
+.msg:hover .msg-acts, .msg:focus-within .msg-acts { display: flex; }
+.msg-act {
+  min-height: 24px; padding: 1px 7px; border: 1.5px solid #000; background: #fff;
+  font-size: 11.5px; font-weight: 850; line-height: 1.5; cursor: pointer; white-space: nowrap;
+}
+.msg-act:hover { background: var(--yellow); }
+.msg-act.on { background: var(--yellow); }
+.msg-act.del:hover { background: var(--coral); }
+.msg-pin-tag {
+  padding: 0 5px; font-size: 10.5px; font-weight: 900; color: #000;
+  background: var(--yellow); border: 1.5px solid #000;
+}
+.msg.flash { background: var(--yellow-mid); border-left-color: var(--yellow); animation: flash 2s ease-out; }
+@keyframes flash { 0%, 45% { background: var(--yellow-mid); } 100% { background: transparent; } }
+@media (hover: none) {
+  .msg-acts { position: static; grid-column: 2; display: flex; margin-top: 4px; border: 0; padding: 0; background: transparent; }
+}
+
+/* ---------- 관리자 콘솔 ---------- */
+.admin-card { max-width: 720px; }
+.admin-tabs { flex: none; display: flex; border-bottom: var(--border); background: var(--bg-alt); overflow-x: auto; }
+.admin-tab {
+  flex: 1 0 auto; min-height: 42px; padding: 6px 12px; border: 0; border-right: 1.5px solid var(--line-soft);
+  background: transparent; color: var(--muted); font-size: 13px; font-weight: 850; cursor: pointer; white-space: nowrap;
+}
+.admin-tab:hover { background: #fff; color: #000; }
+.admin-tab.on { background: #fff; color: #000; box-shadow: inset 0 -4px 0 var(--yellow); }
+.admin-panel { display: block; }
+.admin-panel > .link-sec:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.admin-list { display: grid; gap: 6px; }
+.admin-list .bad { color: var(--bad); }
+
+.admin-row { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: var(--border); background: #fff; }
+.admin-row.off { background: var(--bg-alt); }
+.admin-av { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border: 1.5px solid #000; font-size: 12.5px; font-weight: 900; }
+.admin-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.admin-row-name { font-size: 13.5px; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-row-sub { font-size: 11.5px; font-weight: 650; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-row-tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+.admin-row-acts { flex: none; display: flex; gap: 4px; }
+.tag {
+  display: inline-block; padding: 0 5px; border: 1.5px solid #000; background: #fff;
+  font-size: 10.5px; font-weight: 900; line-height: 1.65; color: #000;
+}
+.tag.admin { background: var(--yellow); }
+.tag.ok { background: var(--green-light); color: var(--ok); border-color: var(--line-soft); }
+.tag.bad { background: var(--coral-light); color: var(--bad); border-color: var(--coral); }
+.tag.quiet { background: var(--bg-alt); color: var(--muted); border-color: var(--line-soft); }
+
+.invite-form { display: grid; gap: 6px; }
+.invite-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.invite-row input, .invite-row select { border: var(--border); padding: 7px 9px; font-size: 13.5px; font-weight: 600; min-width: 0; background: #fff; }
+.invite-row input[type="email"] { flex: 1 1 220px; }
+.invite-row input:not([type="email"]) { flex: 0 1 150px; }
+.invite-row select { flex: 0 0 104px; }
+.invite-row .btn { flex: 0 0 auto; }
+
+.admin-chan { display: grid; gap: 6px; padding: 8px 10px; border: var(--border); background: #fff; }
+.admin-chan-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.admin-chan-head .hash { color: var(--soft); font-weight: 900; }
+.admin-chan-name { font-size: 14px; font-weight: 900; }
+.admin-chan-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.admin-chan-form input { border: var(--border); padding: 6px 8px; font-size: 13px; font-weight: 600; min-width: 0; }
+.admin-chan-form input:nth-of-type(1) { flex: 0 1 150px; }
+.admin-chan-form input:nth-of-type(2) { flex: 1 1 180px; }
+.admin-chan-foot { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.btn.warn { background: #fff; color: var(--bad); border-color: var(--coral); }
+.btn.warn:hover:not(:disabled) { background: var(--coral); color: #000; }
+.btn.danger { background: var(--coral); color: #000; }
+.btn.danger:hover:not(:disabled) { background: #000; color: #fff; }
+
+.sys-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
+.sys-card { display: grid; gap: 1px; padding: 7px 9px; border: var(--border); background: #fff; min-width: 0; }
+.sys-k { font-size: 10.5px; font-weight: 900; letter-spacing: .04em; color: var(--muted); text-transform: uppercase; }
+.sys-v { font-size: 14px; font-weight: 900; overflow: hidden; text-overflow: ellipsis; }
+.sys-sub { font-size: 10.5px; font-weight: 650; color: var(--soft); }
+
+@media (max-width: 860px) {
+  .admin-row { flex-wrap: wrap; }
+  .admin-row-acts { width: 100%; justify-content: flex-end; }
+  .admin-chan-form input:nth-of-type(1) { flex: 1 1 100%; }
+  .admin-chan-form input:nth-of-type(2) { flex: 1 1 100%; }
+  .admin-chan-form .btn { flex: 1 1 auto; }
+  .invite-row input[type="email"], .invite-row input:not([type="email"]) { flex: 1 1 100%; }
+  .invite-row select { flex: 1 1 40%; }
+  .invite-row .btn { flex: 1 1 40%; }
+  .sys-cards { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .pin-body span { font-size: 12px; }
+}

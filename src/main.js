@@ -48,6 +48,10 @@ const S = {
   sig: '',
   tokens: [],
   newToken: '',
+  adminTab: '',
+  adminMembers: [],
+  adminInvites: [],
+  adminOverview: null,
   huddle: null,
   huddleChannelId: null,
   huddleBig: false,
@@ -308,6 +312,96 @@ async function markRead(channelId) {
 }
 const currentChannel = () => S.channels.find((c) => c.id === S.channelId) || null;
 
+// ---------- 공지 고정 (채널 위 공지 띠) ----------
+const pinnedOf = (ch) => (ch && ch.pinned_message ? ch.pinned_message : null);
+
+function renderPin() {
+  const box = $('pin-banner');
+  if (!box) return;
+  const c = currentChannel();
+  const p = c && c.kind === 'channel' ? pinnedOf(c) : null;
+  if (!p) { box.hidden = true; return; }
+  $('pin-who').textContent = p.author_name || '공지';
+  const text = String(p.content || '').replace(/\s+/g, ' ').trim();
+  const files = (p.attachments || []).length;
+  $('pin-text').textContent = text
+    ? (text.length > 140 ? text.slice(0, 140) + '…' : text)
+    : (files ? `📎 첨부 ${files}개` : '공지');
+  $('pin-clear').hidden = !isAdmin();
+  box.hidden = false;
+}
+
+/** 서버가 돌려준 채널 정보(이름·공지)를 화면 목록에 합친다 */
+function mergeChannel(ch) {
+  if (!ch || ch.id == null) return;
+  const i = S.channels.findIndex((c) => c.id === Number(ch.id));
+  if (i >= 0) S.channels[i] = { ...S.channels[i], ...ch };
+  else S.channels.push(ch);
+}
+
+/** 지금 보고 있는 채널이면 머리줄·공지 띠·메시지까지 바로 다시 그린다 */
+function applyChannel(ch) {
+  if (!ch || ch.id == null) return;
+  mergeChannel(ch);
+  if (Number(ch.id) === S.channelId) {
+    renderHeader();
+    renderPin();
+    S.sig = '';
+    renderMessages();
+  }
+  renderSidebar();
+}
+
+async function setPin(channelId, messageId) {
+  if (!S.api || !S.api.pinMessage || !channelId) return;
+  try {
+    const res = await S.api.pinMessage({ channelId, messageId });
+    applyChannel(res.channel);
+    toast(messageId ? '공지로 고정했어요. 채널 위에 모두 보입니다.' : '공지 고정을 해제했어요.');
+  } catch (e) {
+    toast(e.message || '고정하지 못했어요.', 'err');
+  }
+}
+
+/** 공지·알림에서 그 메시지로 이동하며 잠깐 표시한다 */
+function focusMessage(id) {
+  const n = Number(id);
+  const art = document.querySelector(`.messages .msg[data-id="${n}"]`);
+  if (!art) {
+    toast('그 메시지는 지금 목록(최근 200개)에 없어요. 스레드나 위쪽에서 찾아보세요.');
+    return;
+  }
+  art.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  art.classList.remove('flash');
+  void art.offsetWidth;
+  art.classList.add('flash');
+  setTimeout(() => art.classList.remove('flash'), 2000);
+}
+
+async function removeMessage(m, btn) {
+  const own = Boolean(S.me && m.user_id === S.me.id);
+  const ask = own
+    ? '이 메시지를 지울까요? 되돌릴 수 없어요.'
+    : '다른 사람이 쓴 메시지를 지울까요? 되돌릴 수 없어요.';
+  if (!window.confirm(ask)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await S.api.deleteMessage(m.id);
+    // 내가 올린 사진·파일은 버킷에서도 지운다 (버킷 규칙상 남의 파일은 지울 수 없어 그대로 둔다)
+    if (own && m.attachments && m.attachments.length) removeUploaded(m.attachments);
+    if (S.threadParent && S.threadParent.id === m.id) closeThread();
+    await reload();
+    renderPin();
+    S.sig = '';
+    renderMessages();
+    if (res && res.unpinned) toast('메시지를 지웠어요. 공지 고정도 함께 풀렸어요.');
+    else toast('메시지를 지웠어요.');
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast(e.message || '지우지 못했어요.', 'err');
+  }
+}
+
 // ---------- 그리기 ----------
 function renderWho() {
   const w = $('who');
@@ -453,6 +547,10 @@ function messageEl(m, inThread = false) {
   if (m.source === 'preview') head.appendChild(el('span', 'msg-src', '예시 답변'));
   if (m.source === 'fallback') head.appendChild(el('span', 'msg-src', '안내'));
   if (m.pending) head.appendChild(el('span', 'msg-src', '보내는 중…'));
+  const ch = currentChannel();
+  const here = Boolean(ch && ch.id === m.channel_id);
+  const pinned = here && ch.pinned_message_id != null && Number(ch.pinned_message_id) === Number(m.id);
+  if (pinned) head.appendChild(el('span', 'msg-pin-tag', '📌 공지'));
   body.appendChild(head);
 
   const text = el('div', 'msg-text');
@@ -469,6 +567,32 @@ function messageEl(m, inThread = false) {
   }
 
   art.append(av, body);
+
+  // ---------- 메시지 잡기: 공지 고정(관리자) · 삭제(쓴 사람 또는 관리자) ----------
+  const own = Boolean(S.me && m.user_id === S.me.id);
+  const moderate = isAdmin() && here && ch.kind === 'channel';
+  const canPin = !m.pending && moderate && m.parent_id == null;
+  const canDelete = !m.pending && (own || moderate);
+  if (canPin || canDelete) {
+    const acts = el('div', 'msg-acts');
+    if (canPin) {
+      const b = el('button', 'msg-act' + (pinned ? ' on' : ''), pinned ? '📌 해제' : '📌 고정');
+      b.type = 'button';
+      b.title = pinned ? '공지 고정 해제' : '이 메시지를 채널 공지로 고정';
+      b.setAttribute('aria-label', `${m.author_name} 메시지 ${pinned ? '공지 고정 해제' : '공지로 고정'}`);
+      b.addEventListener('click', (e) => { e.stopPropagation(); setPin(m.channel_id, pinned ? null : m.id); });
+      acts.appendChild(b);
+    }
+    if (canDelete) {
+      const b = el('button', 'msg-act del', '🗑️ 삭제');
+      b.type = 'button';
+      b.title = own ? '내 메시지 삭제' : '관리자 권한으로 삭제';
+      b.setAttribute('aria-label', `${m.author_name} 메시지 삭제`);
+      b.addEventListener('click', (e) => { e.stopPropagation(); removeMessage(m, b); });
+      acts.appendChild(b);
+    }
+    art.appendChild(acts);
+  }
   return art;
 }
 
@@ -562,6 +686,20 @@ async function reload({ silent = true } = {}) {
       S.threadReplies = t.messages || [];
     }
     showChatError('');
+    // 채널 머리 정보(이름·설명·공지 고정)도 함께 받는다 — 공지가 바뀌면 메시지 목록도 다시 그린다
+    if (res.channel) {
+      const prev = currentChannel();
+      const prevPin = prev ? prev.pinned_message_id : null;
+      const prevName = prev ? prev.name : '';
+      const prevDesc = prev ? prev.description : '';
+      mergeChannel(res.channel);
+      renderPin();
+      if (prevPin !== (res.channel.pinned_message_id ?? null)) S.sig = '';
+      if (prevName !== res.channel.name || prevDesc !== res.channel.description) {
+        renderHeader();
+        renderSidebar();
+      }
+    }
     const sig = currentSig();
     if (sig !== S.sig) {
       S.sig = sig;
@@ -590,6 +728,7 @@ async function selectChannel(id) {
   closeSidebar();
   renderSidebar();
   renderHeader();
+  renderPin();
   updateComposer();
   renderThread();
   renderMessages(true);
@@ -753,10 +892,11 @@ async function send(inThread) {
   }
 }
 
-// ---------- 연동 열쇠 · MCP (관리자) ----------
+// ---------- 관리자 콘솔 (🛠️ 관리) ----------
 const MCP_URL = FN_URL + '/mcp';
 const tokenFmt = new Intl.DateTimeFormat('ko-KR', { timeZone: TZ, dateStyle: 'short', timeStyle: 'short' });
 const fmtWhen = (v) => (v ? tokenFmt.format(new Date(v)) : '');
+const isAdmin = () => Boolean(S.me && S.me.role === 'admin');
 
 /** Cursor · Claude Desktop 에 붙여 넣을 설정 — 새로 발급한 열쇠가 있으면 그 값을 바로 쓴다 */
 function mcpJson(token) {
@@ -792,13 +932,385 @@ async function copyAndTell(text, label) {
   toast(ok ? `${label} 복사했어요.` : '복사하지 못했어요. 직접 선택해 복사해 주세요.', ok ? '' : 'err');
 }
 
-function setLinkNote(msg, err = false) {
-  const n = $('link-note');
+function setAdminNote(msg, err = false) {
+  const n = $('admin-note');
+  if (!n) return;
   n.textContent = msg || '';
   n.hidden = !msg;
   n.classList.toggle('err', Boolean(err));
 }
 
+function setInviteNote(msg, err = false) {
+  const n = $('invite-note');
+  if (!n) return;
+  n.textContent = msg || '';
+  n.hidden = !msg;
+  n.classList.toggle('err', Boolean(err));
+}
+
+// ---------- 창 · 탭 ----------
+const ADMIN_TABS = ['members', 'channels', 'system'];
+
+function setAdminTab(name) {
+  const tab = ADMIN_TABS.includes(name) ? name : 'members';
+  S.adminTab = tab;
+  for (const t of ADMIN_TABS) {
+    const b = $('tab-' + t);
+    const panel = $('admin-panel-' + t);
+    if (b) { b.classList.toggle('on', t === tab); b.setAttribute('aria-selected', t === tab ? 'true' : 'false'); }
+    if (panel) panel.hidden = t !== tab;
+  }
+  if (tab === 'members') loadAdminMembers();
+  else if (tab === 'channels') renderAdminChannels();
+  else { loadOverview(); loadTokens(); }
+}
+
+function openAdmin(tab) {
+  const box = $('admin-modal');
+  if (!box || !isAdmin()) return;
+  S.newToken = '';
+  $('token-new').hidden = true;
+  $('token-value').textContent = '';
+  $('mcp-url').textContent = MCP_URL;
+  $('mcp-json').textContent = mcpJson('');
+  setAdminNote(S.mode === 'preview' ? '미리보기예요 — 여기서 만든 열쇠는 연습용이고 실제로는 동작하지 않습니다.' : '');
+  setInviteNote('');
+  box.hidden = false;
+  setAdminTab(tab || S.adminTab || 'members');
+}
+
+function closeAdmin() {
+  const box = $('admin-modal');
+  if (box) box.hidden = true;
+}
+
+// ---------- 1. 멤버 · 초대 ----------
+function tag(text, kind = '') {
+  return el('span', 'tag' + (kind ? ' ' + kind : ''), text);
+}
+
+function loadAdminMembers() {
+  if (!S.api || !S.api.adminMembers) return;
+  const box = $('admin-member-list');
+  if (box && !S.adminMembers.length) {
+    box.textContent = '';
+    box.appendChild(el('p', 'token-empty', '불러오는 중…'));
+  }
+  S.api.adminMembers().then((res) => {
+    S.adminMembers = (res.members || []).map((m) => ({ ...m, id: m.id || m.user_id }));
+    S.adminInvites = res.invites || [];
+    renderAdminMembers();
+    renderInvites();
+  }).catch((e) => {
+    const b = $('admin-member-list');
+    if (!b) return;
+    b.textContent = '';
+    b.appendChild(el('p', 'token-empty bad', e.message || '멤버 목록을 불러오지 못했어요.'));
+  });
+}
+
+function renderInvites() {
+  const box = $('invite-list');
+  if (!box) return;
+  box.textContent = '';
+  const list = S.adminInvites || [];
+  if (!list.length) {
+    box.appendChild(el('p', 'token-empty', '대기 중인 초대가 없어요.'));
+    return;
+  }
+  for (const inv of list) {
+    const row = el('div', 'admin-row');
+    const main = el('div', 'admin-row-main');
+    main.appendChild(el('b', 'admin-row-name', inv.name || inv.email));
+    if (inv.name) main.appendChild(el('span', 'admin-row-sub', inv.email));
+    const tags = el('div', 'admin-row-tags');
+    tags.appendChild(tag(inv.role === 'admin' ? '관리자' : '멤버', inv.role === 'admin' ? 'admin' : ''));
+    tags.appendChild(tag(`초대 ${fmtWhen(inv.created_at)}`, 'quiet'));
+    main.appendChild(tags);
+    row.appendChild(main);
+    const b = el('button', 'btn ghost small', '초대 취소');
+    b.type = 'button';
+    b.title = `${inv.email} 초대를 취소`;
+    b.addEventListener('click', () => cancelInvite(inv, b));
+    row.appendChild(b);
+    box.appendChild(row);
+  }
+}
+
+function renderAdminMembers() {
+  const box = $('admin-member-list');
+  if (!box) return;
+  box.textContent = '';
+  const list = (S.adminMembers.length ? S.adminMembers : S.members.map((m) => ({ ...m, id: m.id })));
+  if (!list.length) {
+    box.appendChild(el('p', 'token-empty', '아직 멤버가 없어요.'));
+    return;
+  }
+  for (const m of list) {
+    const mine = Boolean(S.me && m.id === S.me.id);
+    const row = el('div', 'admin-row' + (m.disabled_at ? ' off' : ''));
+    const av = el('span', 'admin-av', firstChar(m.name || m.email));
+    av.style.background = m.avatar_color || PALETTE[0];
+    row.appendChild(av);
+    const main = el('div', 'admin-row-main');
+    main.appendChild(el('b', 'admin-row-name', (m.name || m.email) + (mine ? ' (나)' : '')));
+    main.appendChild(el('span', 'admin-row-sub', m.email));
+    const tags = el('div', 'admin-row-tags');
+    tags.appendChild(tag(m.role === 'admin' ? '관리자' : '멤버', m.role === 'admin' ? 'admin' : ''));
+    tags.appendChild(tag(m.disabled_at ? '차단됨' : '활성', m.disabled_at ? 'bad' : 'ok'));
+    if (m.last_seen_at) tags.appendChild(tag(`최근 ${fmtWhen(m.last_seen_at)}`, 'quiet'));
+    main.appendChild(tags);
+    row.appendChild(main);
+
+    const acts = el('div', 'admin-row-acts');
+    const roleBtn = el('button', 'btn ghost small', m.role === 'admin' ? '관리자 해제' : '관리자 지정');
+    roleBtn.type = 'button';
+    roleBtn.disabled = mine;
+    roleBtn.title = mine ? '내 계정의 권한은 바꿀 수 없어요.' : (m.role === 'admin' ? '관리자 권한 해제' : '관리자로 지정');
+    roleBtn.addEventListener('click', () => changeMemberRole(m, roleBtn));
+    acts.appendChild(roleBtn);
+    const blockBtn = el('button', 'btn ghost small' + (m.disabled_at ? '' : ' warn'), m.disabled_at ? '차단 해제' : '차단');
+    blockBtn.type = 'button';
+    blockBtn.disabled = mine;
+    blockBtn.title = mine ? '내 계정은 차단할 수 없어요.' : (m.disabled_at ? '다시 들어올 수 있게 풀기' : '이 계정의 접근 막기');
+    blockBtn.addEventListener('click', () => toggleMemberBlock(m, blockBtn));
+    acts.appendChild(blockBtn);
+    row.appendChild(acts);
+    box.appendChild(row);
+  }
+}
+
+/** 멤버 한 명의 바뀐 정보를 화면 여러 곳에 반영 */
+function applyMember(updated) {
+  if (!updated || !updated.user_id) return;
+  const merge = (list) => list.map((m) => ((m.id || m.user_id) === updated.user_id
+    ? { ...m, ...updated, id: updated.user_id } : m));
+  S.adminMembers = merge(S.adminMembers);
+  S.members = S.members.map((m) => (m.id === updated.user_id
+    ? { ...m, ...updated, id: updated.user_id } : m));
+  if (S.me && S.me.id === updated.user_id) Object.assign(S.me, { role: updated.role });
+  renderAdminMembers();
+  renderSidebar();
+  $('admin-open').hidden = !isAdmin();
+}
+
+async function changeMemberRole(m, btn) {
+  const next = m.role === 'admin' ? 'member' : 'admin';
+  const who = m.name || m.email;
+  const ask = next === 'admin'
+    ? `${who} 님을 관리자로 지정할까요?\n\n관리자는 멤버·채널을 관리하고 연동 열쇠를 만들 수 있어요.`
+    : `${who} 님의 관리자 권한을 해제할까요?\n\n멤버로 돌아가고 관리 화면은 보이지 않게 됩니다.`;
+  if (!window.confirm(ask)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await S.api.updateMember({ userId: m.id, role: next });
+    applyMember(res.member);
+    toast(next === 'admin' ? '관리자로 지정했어요.' : '관리자 권한을 해제했어요.');
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast(e.message || '바꾸지 못했어요.', 'err');
+  }
+}
+
+async function toggleMemberBlock(m, btn) {
+  const who = m.name || m.email;
+  const block = !m.disabled_at;
+  const ask = block
+    ? `${who} 님의 접근을 차단할까요?\n\n그 계정으로는 이 워크스페이스가 열리지 않습니다(나중에 풀 수 있어요).`
+    : `${who} 님의 차단을 풀까요?\n\n다시 들어올 수 있게 됩니다.`;
+  if (!window.confirm(ask)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await S.api.updateMember({ userId: m.id, disabled: block });
+    applyMember(res.member);
+    toast(block ? '접근을 차단했어요.' : '차단을 풀었어요.');
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast(e.message || '바꾸지 못했어요.', 'err');
+  }
+}
+
+async function sendInvite(e) {
+  if (e) e.preventDefault();
+  const emailIn = $('invite-email');
+  const nameIn = $('invite-name');
+  const roleIn = $('invite-role');
+  const email = emailIn.value.trim();
+  if (!email) { emailIn.focus(); return; }
+  const btn = $('invite-btn');
+  btn.disabled = true;
+  setInviteNote('');
+  try {
+    await S.api.inviteMember({ email, name: nameIn.value.trim(), role: roleIn.value });
+    $('invite-form').reset();
+    setInviteNote(`${email} 님을 초대했어요. 그 메일의 구글 계정으로 로그인하면 바로 들어옵니다.`);
+    loadAdminMembers();
+  } catch (err) {
+    setInviteNote(err.message || '초대하지 못했어요.', true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function cancelInvite(inv, btn) {
+  if (!window.confirm(`${inv.email} 님의 초대를 취소할까요?`)) return;
+  if (btn) btn.disabled = true;
+  try {
+    await S.api.removeInvite(inv.email);
+    S.adminInvites = S.adminInvites.filter((x) => x.email !== inv.email);
+    renderInvites();
+    toast('초대를 취소했어요.');
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    setInviteNote(e.message || '취소하지 못했어요.', true);
+  }
+}
+
+// ---------- 2. 채널 관리 ----------
+function renderAdminChannels() {
+  const box = $('admin-channel-list');
+  if (!box) return;
+  box.textContent = '';
+  const list = S.channels.filter((c) => c.kind === 'channel');
+  if (!list.length) {
+    box.appendChild(el('p', 'token-empty', '공개 채널이 없어요.'));
+    return;
+  }
+  for (const c of list) {
+    const row = el('div', 'admin-chan');
+    const head = el('div', 'admin-chan-head');
+    head.appendChild(el('span', 'hash', '#'));
+    head.appendChild(el('b', 'admin-chan-name', c.name));
+    if (c.slug === 'general') head.appendChild(tag('기본 채널', 'quiet'));
+    if (c.pinned_message) head.appendChild(tag('📌 공지 있음', 'ok'));
+    row.appendChild(head);
+
+    const form = el('form', 'admin-chan-form');
+    const nameIn = document.createElement('input');
+    nameIn.value = c.name;
+    nameIn.maxLength = 40;
+    nameIn.required = true;
+    nameIn.setAttribute('aria-label', `${c.name} 채널 이름`);
+    const descIn = document.createElement('input');
+    descIn.value = c.description || '';
+    descIn.maxLength = 200;
+    descIn.placeholder = '채널 설명';
+    descIn.setAttribute('aria-label', `${c.name} 채널 설명`);
+    const save = el('button', 'btn small', '저장');
+    save.type = 'submit';
+    save.disabled = true;
+    const same = () => nameIn.value.trim().replace(/^#+/, '') === c.name
+      && descIn.value.trim() === (c.description || '');
+    const dirty = () => { save.disabled = same(); };
+    nameIn.addEventListener('input', dirty);
+    descIn.addEventListener('input', dirty);
+    form.append(nameIn, descIn, save);
+    form.addEventListener('submit', (e) => { e.preventDefault(); saveChannel(c, nameIn, descIn, save); });
+    row.appendChild(form);
+
+    const foot = el('div', 'admin-chan-foot');
+    if (c.pinned_message) {
+      const un = el('button', 'btn ghost small', '📌 공지 고정 해제');
+      un.type = 'button';
+      un.addEventListener('click', () => setPin(c.id, null));
+      foot.appendChild(un);
+    }
+    const del = el('button', 'btn small danger', '채널 지우기');
+    del.type = 'button';
+    if (c.slug === 'general') {
+      del.disabled = true;
+      del.title = '#일반 은 기본 채널이라 지울 수 없어요.';
+    }
+    del.addEventListener('click', () => deleteChannel(c, del));
+    foot.appendChild(del);
+    row.appendChild(foot);
+    box.appendChild(row);
+  }
+}
+
+async function saveChannel(c, nameIn, descIn, btn) {
+  const name = nameIn.value.trim().replace(/^#+/, '');
+  const description = descIn.value.trim();
+  if (!name) { nameIn.focus(); return; }
+  if (btn) btn.disabled = true;
+  try {
+    const res = await S.api.updateChannel({ channelId: c.id, name, description });
+    applyChannel(res.channel);
+    renderAdminChannels();
+    toast(`#${name} 채널을 고쳤어요.`);
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast(e.message || '고치지 못했어요.', 'err');
+  }
+}
+
+async function deleteChannel(c, btn) {
+  const ask = `#${c.name} 채널을 지울까요?\n\n채널의 메시지·사진도 함께 사라지고 되돌릴 수 없어요.`;
+  if (!window.confirm(ask)) return;
+  if (btn) btn.disabled = true;
+  try {
+    await S.api.deleteChannel(c.id);
+    S.channels = S.channels.filter((x) => x.id !== c.id);
+    delete S.unread[c.id];
+    renderAdminChannels();
+    renderSidebar();
+    updateUnreadUi();
+    if (S.channelId === c.id) {
+      const next = S.channels.find((x) => x.kind === 'channel') || S.channels[0] || null;
+      S.channelId = null;
+      if (next) await selectChannel(next.id);
+      else { S.messages = []; renderHeader(); renderMessages(true); }
+    }
+    toast(`#${c.name} 채널을 지웠어요.`);
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    toast(e.message || '지우지 못했어요.', 'err');
+  }
+}
+
+// ---------- 3. 연동 · 시스템 ----------
+function sysCard(k, v, sub) {
+  const card = el('div', 'sys-card');
+  card.appendChild(el('span', 'sys-k', k));
+  card.appendChild(el('b', 'sys-v', v));
+  if (sub) card.appendChild(el('span', 'sys-sub', sub));
+  return card;
+}
+
+function renderOverview(o) {
+  const box = $('sys-cards');
+  if (!box) return;
+  box.textContent = '';
+  const c = (o && o.counts) || {};
+  const ai = (o && o.ai) || {};
+  const last = ai.last || null;
+  const aiSrc = last ? (last.source === 'gemini' ? '성공' : last.source === 'fallback' ? '안내 문구' : '오류') : '아직 없음';
+  box.appendChild(sysCard('AI 모델', ai.model || '—', ai.key_set ? '열쇠 설정됨' : '열쇠 없음'));
+  box.appendChild(sysCard('AI 마지막 답', aiSrc, last ? `${fmtWhen(last.at)}` : '메시지에서 @AI 를 불러 보세요'));
+  box.appendChild(sysCard('푸시 알림', o && o.push ? '켜짐' : '꺼짐', `구독 ${c.push_subs ?? 0}개`));
+  box.appendChild(sysCard('봇 열쇠', `${c.bot_tokens ?? 0}개 사용 중`, o && o.bot && o.bot.env_token ? '서버 열쇠도 켜져 있음' : ''));
+  box.appendChild(sysCard('멤버', `${c.members ?? 0}명`, `관리자 ${c.admins ?? 0} · 차단 ${c.disabled ?? 0}`));
+  box.appendChild(sysCard('초대 대기', `${c.invites ?? 0}명`, '아직 로그인하지 않은 초대'));
+  box.appendChild(sysCard('채널', `${c.channels ?? 0}개`, `DM ${c.dms ?? 0}개`));
+  box.appendChild(sysCard('메시지', `${c.messages ?? 0}개`, o && o.last_message_at ? `마지막 ${fmtWhen(o.last_message_at)}` : ''));
+}
+
+async function loadOverview() {
+  const box = $('sys-cards');
+  if (!box || !S.api || !S.api.adminOverview) return;
+  box.textContent = '';
+  box.appendChild(el('p', 'token-empty', '불러오는 중…'));
+  try {
+    const o = await S.api.adminOverview();
+    S.adminOverview = o;
+    renderOverview(o);
+  } catch (e) {
+    box.textContent = '';
+    box.appendChild(el('p', 'token-empty bad', e.message || '현황을 불러오지 못했어요.'));
+  }
+}
+
+// ---------- 연동 열쇠 ----------
 function renderTokens() {
   const box = $('token-list');
   box.textContent = '';
@@ -838,11 +1350,11 @@ async function loadTokens() {
     const res = await S.api.botTokens();
     S.tokens = res.tokens || [];
     renderTokens();
-    if (res.env_token) setLinkNote('서버 비밀값(WORKSPACE_BOT_TOKEN)으로 넣은 열쇠도 함께 쓰이고 있어요.');
-    else if (S.mode === 'preview') setLinkNote('미리보기예요 — 진짜 열쇠는 만들어지지 않고 어디에도 저장되지 않습니다.');
-    else setLinkNote('');
+    if (res.env_token) setAdminNote('서버 비밀값(WORKSPACE_BOT_TOKEN)으로 넣은 열쇠도 함께 쓰이고 있어요.');
+    else if (S.mode === 'preview') setAdminNote('미리보기예요 — 진짜 열쇠는 만들어지지 않고 어디에도 저장되지 않습니다.');
+    else setAdminNote('');
   } catch (e) {
-    setLinkNote(e.message || '열쇠 목록을 불러오지 못했어요.', true);
+    setAdminNote(e.message || '열쇠 목록을 불러오지 못했어요.', true);
   }
 }
 
@@ -861,10 +1373,10 @@ async function issueToken(e) {
     $('mcp-json').textContent = mcpJson(S.newToken);
     input.value = '';
     await loadTokens();
-    if (S.mode === 'preview') setLinkNote('미리보기예요 — 진짜 열쇠는 만들어지지 않고 어디에도 저장되지 않습니다.');
-    else setLinkNote("열쇠를 발급했어요. 아래 '복사'로 지금 바로 옮겨 두세요.");
+    if (S.mode === 'preview') setAdminNote('미리보기예요 — 진짜 열쇠는 만들어지지 않고 어디에도 저장되지 않습니다.');
+    else setAdminNote("열쇠를 발급했어요. 아래 '복사'로 지금 바로 옮겨 두세요.");
   } catch (err) {
-    setLinkNote(err.message || '열쇠를 발급하지 못했어요.', true);
+    setAdminNote(err.message || '열쇠를 발급하지 못했어요.', true);
   } finally {
     btn.disabled = false;
   }
@@ -876,30 +1388,11 @@ async function revokeToken(t, btn) {
   try {
     await S.api.revokeBotToken(t.id);
     await loadTokens();
-    setLinkNote(`«${t.name}» 열쇠를 폐기했어요.`);
+    setAdminNote(`«${t.name}» 열쇠를 폐기했어요.`);
   } catch (e) {
     btn.disabled = false;
-    setLinkNote(e.message || '폐기하지 못했어요.', true);
+    setAdminNote(e.message || '폐기하지 못했어요.', true);
   }
-}
-
-function openLinkModal() {
-  const box = $('link-modal');
-  if (!box) return;
-  S.newToken = '';
-  $('token-new').hidden = true;
-  $('token-value').textContent = '';
-  $('mcp-url').textContent = MCP_URL;
-  $('mcp-json').textContent = mcpJson('');
-  setLinkNote(S.mode === 'preview' ? '미리보기예요 — 여기서 만든 열쇠는 연습용이고 실제로는 동작하지 않습니다.' : '');
-  box.hidden = false;
-  $('token-name').focus();
-  loadTokens();
-}
-
-function closeLinkModal() {
-  const box = $('link-modal');
-  if (box) box.hidden = true;
 }
 
 // ---------- 음성·화상 회의(허들) ----------
@@ -1125,8 +1618,8 @@ function showLogin(msg = '', isErr = false) {
   $('conn').hidden = true;
   $('open-sidebar').hidden = true;
   $('bell').hidden = true;
-  $('link-admin').hidden = true;
-  closeLinkModal();
+  $('admin-open').hidden = true;
+  closeAdmin();
   $('login-logout').hidden = !S.hasSession;
 }
 
@@ -1159,7 +1652,11 @@ function teardown() {
   S.unread = {};
   S.tokens = [];
   S.newToken = '';
-  closeLinkModal();
+  S.adminMembers = [];
+  S.adminInvites = [];
+  S.adminOverview = null;
+  S.adminTab = '';
+  closeAdmin();
   updateUnreadUi();
 }
 
@@ -1179,7 +1676,7 @@ function enter(data, mode) {
   $('logout').hidden = false;
   $('open-sidebar').hidden = false;
   $('bell').hidden = mode !== 'live';
-  $('link-admin').hidden = !(S.me && S.me.role === 'admin');
+  $('admin-open').hidden = !(S.me && S.me.role === 'admin');
   if (mode === 'live') refreshBell();
   $('logout').textContent = mode === 'preview' && !narrowScreen() ? '미리보기 끝내기' : (mode === 'preview' ? '나가기' : '로그아웃');
   $('conn').hidden = false;
@@ -1395,9 +1892,23 @@ function bind() {
   $('close-thread').addEventListener('click', closeThread);
 
   // ---------- 연동 열쇠 · MCP 창 ----------
-  $('link-admin').addEventListener('click', openLinkModal);
-  $('link-close').addEventListener('click', closeLinkModal);
-  $('link-modal').addEventListener('click', (e) => { if (e.target === $('link-modal')) closeLinkModal(); });
+  // ---------- 관리자 콘솔 창 ----------
+  $('admin-open').addEventListener('click', () => openAdmin());
+  $('admin-close').addEventListener('click', closeAdmin);
+  $('admin-modal').addEventListener('click', (e) => { if (e.target === $('admin-modal')) closeAdmin(); });
+  for (const t of ADMIN_TABS) {
+    const b = $('tab-' + t);
+    if (b) b.addEventListener('click', () => setAdminTab(t));
+  }
+  $('invite-form').addEventListener('submit', sendInvite);
+
+  // ---------- 공지 띠 ----------
+  $('pin-jump').addEventListener('click', () => {
+    const p = pinnedOf(currentChannel());
+    if (p) focusMessage(p.id);
+  });
+  $('pin-clear').addEventListener('click', () => { if (S.channelId) setPin(S.channelId, null); });
+
   $('token-form').addEventListener('submit', issueToken);
   $('token-copy').addEventListener('click', () => copyAndTell(S.newToken, '열쇠를'));
   $('mcp-url-copy').addEventListener('click', () => copyAndTell(MCP_URL, 'MCP 서버 주소를'));
@@ -1536,7 +2047,7 @@ function bind() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('link-modal').hidden) closeLinkModal();
+    if (!$('admin-modal').hidden) closeAdmin();
     else if (!$('lightbox').hidden) closeLightbox();
     else if (S.threadOpen) closeThread();
     else if ($('sidebar').classList.contains('open')) closeSidebar();

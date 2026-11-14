@@ -8,15 +8,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let seq = 1000;
 
 const ME = {
-  // 미리보기에서는 관리자로 둔다 — 새로 만든 🔑 연동 창을 그대로 둘러볼 수 있게 (실제 열쇠는 만들지 않음)
+  // 미리보기에서는 관리자로 둔다 — 🛠️ 관리 창(멤버·채널·연동)을 그대로 둘러볼 수 있게 (실제 열쇠는 만들지 않음)
   id: 'u-me', email: 'preview@bmrschool.net', name: '나 (미리보기)', role: 'admin',
-  avatar_color: '#ffdc1a', last_seen_at: iso(Date.now()),
+  avatar_color: '#ffdc1a', last_seen_at: iso(Date.now()), disabled_at: null,
 };
 const MEMBERS = [
-  { id: 'u-haneul', email: 'haneul@bmrschool.org', name: '김하늘', role: 'member', avatar_color: '#0abbee', last_seen_at: iso(Date.now() - 40 * MIN) },
-  { id: 'u-seoyun', email: 'seoyun@bmrschool.org', name: '이서윤', role: 'member', avatar_color: '#02c245', last_seen_at: iso(Date.now() - 95 * MIN) },
-  { id: 'u-junho', email: 'junho@bmrschool.org', name: '박준호', role: 'member', avatar_color: '#7e65c1', last_seen_at: iso(Date.now() - 300 * MIN) },
-  { id: 'u-minji', email: 'minji@bmrschool.org', name: '최민지', role: 'member', avatar_color: '#ff614a', last_seen_at: iso(Date.now() - 26 * 60 * MIN) },
+  { id: 'u-haneul', email: 'haneul@bmrschool.org', name: '김하늘', role: 'member', avatar_color: '#0abbee', last_seen_at: iso(Date.now() - 40 * MIN), disabled_at: null },
+  { id: 'u-seoyun', email: 'seoyun@bmrschool.org', name: '이서윤', role: 'member', avatar_color: '#02c245', last_seen_at: iso(Date.now() - 95 * MIN), disabled_at: null },
+  { id: 'u-junho', email: 'junho@bmrschool.org', name: '박준호', role: 'member', avatar_color: '#7e65c1', last_seen_at: iso(Date.now() - 300 * MIN), disabled_at: null },
+  { id: 'u-minji', email: 'minji@bmrschool.org', name: '최민지', role: 'member', avatar_color: '#ff614a', last_seen_at: iso(Date.now() - 26 * 60 * MIN), disabled_at: null },
+  { id: 'u-sujin', email: 'sujin@bmrschool.net', name: '한수진', role: 'admin', avatar_color: '#b0e7f8', last_seen_at: iso(Date.now() - 12 * MIN), disabled_at: null },
   ME,
 ];
 
@@ -59,10 +60,23 @@ function seedMessages() {
 let db = null;
 let unreadState = {};
 let tokenState = [];
+let inviteState = [];
 function reset() {
-  db = { channels: CHANNELS.map((c) => ({ ...c })), messages: seedMessages() };
+  db = {
+    members: MEMBERS.map((m) => ({ ...m })),
+    channels: CHANNELS.map((c) => ({ ...c, pinned_message_id: null })),
+    messages: seedMessages(),
+  };
   // 연습용 안 읽은 배지 (2번 #수업-나눔 2개, 5번 김하늘 DM 1개)
   unreadState = { 2: 2, 5: 1 };
+  // 관리자 화면 연습용: 대기 중인 초대 하나 + 차단된 멤버 하나
+  inviteState = [{ email: 'guest.teacher@gmail.com', name: '외부 강사', role: 'member', created_at: iso(Date.now() - 90 * MIN) }];
+  const blocked = db.members.find((m) => m.id === 'u-junho');
+  if (blocked) blocked.disabled_at = iso(Date.now() - 30 * MIN);
+  // #일반 의 첫 메시지를 공지로 고정해 둔 상태 (공지 띠 연습)
+  const noted = db.messages.find((m) => m.channel_id === 1 && m.parent_id == null);
+  const general = db.channels.find((c) => c.slug === 'general');
+  if (noted && general) general.pinned_message_id = noted.id;
   tokenState = [{
     id: 1, name: '피클 (Alter)', token_prefix: 'bmrws_Pr3v1w',
     created_at: iso(Date.now() - 6 * 60 * MIN), last_used_at: iso(Date.now() - 2 * MIN), revoked_at: null,
@@ -154,6 +168,17 @@ function aiReply(text, channelName, attachments = []) {
 function channelOf(id) { return db.channels.find((c) => c.id === Number(id)); }
 function findMessage(id) { return db.messages.find((m) => m.id === Number(id)); }
 function publicMessage(m) { return { ...m, reply_count: db.messages.filter((r) => r.parent_id === m.id).length }; }
+/** 채널 + 공지로 고정한 메시지 (실제 서버 응답과 같은 모양) */
+function channelOut(c) {
+  const pin = c.pinned_message_id ? findMessage(c.pinned_message_id) : null;
+  return {
+    ...c,
+    pinned_message_id: c.pinned_message_id == null ? null : Number(c.pinned_message_id),
+    pinned_message: pin ? publicMessage(pin) : null,
+    unread: unreadState[c.id] || 0,
+  };
+}
+const emailOk = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v);
 
 export const previewApi = {
   mode: 'preview',
@@ -161,19 +186,22 @@ export const previewApi = {
 
   async bootstrap() {
     reset();
+    const me = db.members.find((m) => m.id === ME.id) || ME;
     return {
-      me: { ...ME, last_seen_at: iso(Date.now()) },
-      members: MEMBERS.map((m) => ({ ...m })),
-      channels: db.channels.map((c) => ({ ...c, unread: unreadState[c.id] || 0 })),
+      me: { ...me },
+      members: db.members.map((m) => ({ ...m })),
+      channels: db.channels.map(channelOut),
       gemini_key_set: false,
       preview: true,
     };
   },
 
   async messages(channelId) {
-    if (!channelOf(channelId)) throw new Error('없는 채널입니다.');
+    const ch = channelOf(channelId);
+    if (!ch) throw new Error('없는 채널입니다.');
     return {
       channel_id: Number(channelId),
+      channel: channelOut(ch),
       messages: db.messages.filter((m) => m.channel_id === Number(channelId) && m.parent_id == null)
         .sort((a, b) => a.id - b.id).map(publicMessage),
       unread: unreadList(),
@@ -183,8 +211,10 @@ export const previewApi = {
   async thread(channelId, parentId) {
     const parent = findMessage(parentId);
     if (!parent) throw new Error('스레드의 원래 메시지를 찾지 못했습니다.');
+    const ch = channelOf(channelId);
     return {
       channel_id: Number(channelId),
+      channel: ch ? channelOut(ch) : null,
       parent: publicMessage(parent),
       messages: db.messages.filter((m) => m.parent_id === Number(parentId)).sort((a, b) => a.id - b.id).map(publicMessage),
       unread: unreadList(),
@@ -236,20 +266,21 @@ export const previewApi = {
     const ch = {
       id: ++seq, slug: 'c-' + seq, name: clean, kind: 'channel',
       description: String(description || '').trim().slice(0, 200), dm_key: null, created_at: iso(Date.now()),
+      pinned_message_id: null,
     };
     db.channels.push(ch);
-    return { channel: { ...ch } };
+    return { channel: channelOut(ch) };
   },
 
   async openDm(targetUserId) {
-    const other = MEMBERS.find((m) => m.id === targetUserId);
+    const other = db.members.find((m) => m.id === targetUserId);
     if (!other) throw new Error('상대를 찾지 못했습니다.');
     const key = ['dm', ME.id, other.id].sort().join(':');
     const found = db.channels.find((c) => c.dm_key === key || c.dm_key === `dm:${other.id}:${ME.id}`);
-    if (found) return { channel: { ...found } };
-    const ch = { id: ++seq, slug: 'dm-' + seq, name: other.name, kind: 'dm', description: '', dm_key: key, created_at: iso(Date.now()) };
+    if (found) return { channel: channelOut(found) };
+    const ch = { id: ++seq, slug: 'dm-' + seq, name: other.name, kind: 'dm', description: '', dm_key: key, created_at: iso(Date.now()), pinned_message_id: null };
     db.channels.push(ch);
-    return { channel: { ...ch } };
+    return { channel: channelOut(ch) };
   },
 
   // 미리보기는 실시간 구독이 없습니다 (5초 폴링도 필요 없음)
@@ -278,6 +309,115 @@ export const previewApi = {
     if (row.revoked_at) throw new Error('이미 폐기된 열쇠입니다.');
     row.revoked_at = iso(Date.now());
     return { ok: true, id: row.id, revoked_at: row.revoked_at };
+  },
+
+  // ---------- 관리자 콘솔 (미리보기: 이 브라우저 안에서만 바뀌고 새로 고치면 처음 상태) ----------
+  async adminMembers() {
+    return {
+      me: ME.id,
+      members: db.members.map((m) => ({ ...m, user_id: m.id })),
+      invites: inviteState.map((i) => ({ ...i })),
+    };
+  },
+
+  async adminOverview() {
+    const c = {
+      members: db.members.length,
+      disabled: db.members.filter((m) => m.disabled_at).length,
+      admins: db.members.filter((m) => m.role === 'admin').length,
+      invites: inviteState.length,
+      channels: db.channels.filter((x) => x.kind === 'channel').length,
+      dms: db.channels.filter((x) => x.kind === 'dm').length,
+      messages: db.messages.length,
+      push_subs: 0,
+      bot_tokens: tokenState.filter((t) => !t.revoked_at).length,
+    };
+    return {
+      counts: c,
+      last_message_at: db.messages.length ? db.messages[db.messages.length - 1].created_at : null,
+      ai: { key_set: false, model: 'gemini (미리보기)', last: null },
+      push: false,
+      bot: { env_token: false },
+      preview: true,
+    };
+  },
+
+  async inviteMember({ email, name, role }) {
+    const clean = String(email || '').trim().toLowerCase();
+    if (!emailOk(clean)) throw new Error('이메일 주소를 확인해 주세요.');
+    if (db.members.some((m) => m.email === clean)) throw new Error('이미 이 워크스페이스에 들어와 있는 메일이에요.');
+    const row = {
+      email: clean, name: String(name || '').trim().slice(0, 40),
+      role: role === 'admin' ? 'admin' : 'member', created_at: iso(Date.now()),
+    };
+    const i = inviteState.findIndex((x) => x.email === clean);
+    if (i >= 0) inviteState[i] = row; else inviteState.unshift(row);
+    return { invite: { ...row } };
+  },
+
+  async removeInvite(email) {
+    const clean = String(email || '').trim().toLowerCase();
+    const i = inviteState.findIndex((x) => x.email === clean);
+    if (i < 0) throw new Error('대기 중인 초대가 아니에요.');
+    inviteState.splice(i, 1);
+    return { ok: true, email: clean };
+  },
+
+  async updateMember({ userId, role, disabled }) {
+    const m = db.members.find((x) => x.id === userId);
+    if (!m) throw new Error('이 워크스페이스의 멤버가 아니에요.');
+    if (userId === ME.id && (role === 'member' || disabled === true)) throw new Error('내 계정의 권한은 바꿀 수 없어요.');
+    if (role === 'admin' || role === 'member') m.role = role;
+    if (disabled !== undefined) m.disabled_at = disabled ? iso(Date.now()) : null;
+    return { member: { ...m, user_id: m.id } };
+  },
+
+  async updateChannel({ channelId, name, description }) {
+    const ch = channelOf(channelId);
+    if (!ch || ch.kind !== 'channel') throw new Error('공개 채널만 고칠 수 있어요.');
+    if (name !== undefined) {
+      const clean = String(name || '').replace(/^#+/, '').trim().slice(0, 40);
+      if (!clean) throw new Error('채널 이름을 적어 주세요.');
+      ch.name = clean;
+    }
+    if (description !== undefined) ch.description = String(description || '').trim().slice(0, 200);
+    return { channel: channelOut(ch) };
+  },
+
+  async deleteChannel(channelId) {
+    const ch = channelOf(channelId);
+    if (!ch || ch.kind !== 'channel') throw new Error('공개 채널만 지울 수 있어요.');
+    if (ch.slug === 'general') throw new Error('#일반 채널은 지울 수 없어요.');
+    const n = db.messages.filter((m) => m.channel_id === ch.id).length;
+    db.messages = db.messages.filter((m) => m.channel_id !== ch.id);
+    db.channels = db.channels.filter((x) => x.id !== ch.id);
+    delete unreadState[ch.id];
+    return { ok: true, id: ch.id, name: ch.name, messages: n };
+  },
+
+  async pinMessage({ channelId, messageId }) {
+    const ch = channelOf(channelId);
+    if (!ch) throw new Error('없는 채널입니다.');
+    if (ch.kind !== 'channel') throw new Error('공지 고정은 공개 채널에서만 쓸 수 있어요.');
+    if (messageId == null) {
+      ch.pinned_message_id = null;
+    } else {
+      const m = findMessage(messageId);
+      if (!m || m.channel_id !== ch.id) throw new Error('이 채널의 메시지가 아니에요.');
+      if (m.parent_id != null) throw new Error('스레드 답글은 고정할 수 없어요.');
+      ch.pinned_message_id = m.id;
+    }
+    return { channel: channelOut(ch) };
+  },
+
+  async deleteMessage(messageId) {
+    const m = findMessage(messageId);
+    if (!m) throw new Error('이미 지워졌거나 없는 메시지예요.');
+    const replies = db.messages.filter((x) => x.parent_id === m.id).length;
+    const unpinned = db.channels.some((c) => Number(c.pinned_message_id) === m.id);
+    db.messages = db.messages.filter((x) => x.id !== m.id && x.parent_id !== m.id);
+    for (const c of db.channels) if (Number(c.pinned_message_id) === m.id) c.pinned_message_id = null;
+    return { ok: true, id: m.id, channel_id: m.channel_id, parent_id: m.parent_id, replies, unpinned };
   },
 
   reset,
