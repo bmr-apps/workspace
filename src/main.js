@@ -1339,8 +1339,12 @@ function renderOverview(o) {
     : '아직 없음';
   // via 가 없는 옛 응답이면 열쇠 상태로 짐작한다
   const via = ai.via || (ai.key_set ? 'gemini' : 'none');
-  const viaLabel = via === 'hub' ? 'hub-ai (허브 공용)' : via === 'gemini' ? 'Gemini 직접' : '아직 없음';
-  box.appendChild(sysCard('AI 연결', viaLabel, via === 'hub' ? `모델 ${ai.model || '허브 기본 모델'}` : via === 'gemini' ? `모델 ${ai.model || '—'}` : 'AI 열쇠 없음'));
+  const previewing = Boolean(o && o.preview);
+  const viaLabel = previewing ? '미리보기' : via === 'hub' ? 'hub-ai (허브 공용)' : via === 'gemini' ? 'Gemini 직접' : '아직 없음';
+  const viaSub = previewing ? '예시 답변으로 보여 줍니다'
+    : via === 'hub' ? `모델 ${ai.model || '허브 기본 모델'}`
+      : via === 'gemini' ? `모델 ${ai.model || '—'}` : 'AI 열쇠 없음';
+  box.appendChild(sysCard('AI 연결', viaLabel, viaSub));
   box.appendChild(sysCard('AI 마지막 답', aiSrc, last ? `${fmtWhen(last.at)}${last.model ? ` · ${last.model}` : ''}` : '메시지에서 @AI 를 불러 보세요'));
   box.appendChild(sysCard('✉️ 초대 메일', o && o.mail_ready ? '연결됨' : '토큰 필요', o && o.mail_ready ? 'workspace@mail.bmrschool.net' : '허브에서 메일 토큰 설정'));
   box.appendChild(sysCard('푸시 알림', o && o.push ? '켜짐' : '꺼짐', `구독 ${c.push_subs ?? 0}개`));
@@ -1351,11 +1355,13 @@ function renderOverview(o) {
   box.appendChild(sysCard('메시지', `${c.messages ?? 0}개`, o && o.last_message_at ? `마지막 ${fmtWhen(o.last_message_at)}` : ''));
   const note = $('ai-note');
   if (note) {
-    note.textContent = via === 'hub'
-      ? 'AI 는 학교 공용 게이트웨이(hub-ai)로 부릅니다. 업체 키는 허브만 갖고, 이 워크스페이스는 WORKSPACE_AI_TOKEN 으로 신분만 증명합니다. 모델·허용 목록·한도는 허브 → 내 서비스 → 앱 정보 → 🤖 앱 AI 에서 바꾸면 바로 적용됩니다.'
-      : via === 'gemini'
-        ? 'AI 는 예비 경로로 Gemini 를 직접 부릅니다(WORKSPACE_GEMINI_API_KEY). 허브 → 내 서비스 → 앱 정보 → 🤖 앱 AI 에서 AI 토큰을 발급하면(WORKSPACE_AI_TOKEN) 공용 게이트웨이(hub-ai)로 바뀝니다.'
-        : 'AI 열쇠가 아직 없습니다. 허브 → 내 서비스 → 앱 정보 → 🤖 앱 AI 에서 AI 토큰을 발급하면 Alter 가 바로 답합니다.';
+    note.textContent = previewing
+      ? '미리보기 모드에서는 Alter 답변이 예시로 나옵니다. 학교 공용 AI(hub-ai) 연결 상태는 로그인한 관리 화면에서 볼 수 있어요.'
+      : via === 'hub'
+        ? 'AI 는 학교 공용 게이트웨이(hub-ai)로 부릅니다. 업체 키는 허브만 갖고, 이 워크스페이스는 WORKSPACE_AI_TOKEN 으로 신분만 증명합니다. 모델·허용 목록·한도는 허브 → 내 서비스 → 앱 정보 → 🤖 앱 AI 에서 바꾸면 바로 적용됩니다.'
+        : via === 'gemini'
+          ? 'AI 는 예비 경로로 Gemini 를 직접 부릅니다(WORKSPACE_GEMINI_API_KEY). 허브 → 내 서비스 → 앱 정보 → 🤖 앱 AI 에서 AI 토큰을 발급하면(WORKSPACE_AI_TOKEN) 공용 게이트웨이(hub-ai)로 바뀝니다.'
+          : 'AI 열쇠가 아직 없습니다. 허브 → 내 서비스 → 앱 정보 → 🤖 앱 AI 에서 AI 토큰을 발급하면 Alter 가 바로 답합니다.';
   }
 }
 
