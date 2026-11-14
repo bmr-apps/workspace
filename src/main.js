@@ -672,6 +672,7 @@ async function send(inThread) {
         renderPending(inThread);
         item.att = S.mode === 'preview' ? previewAttachment(item.file) : await uploadAttachment(item.file);
         item.state = 'done';
+        attachments.push(item.att);
         renderPending(inThread);
       }
     } catch (e) {
