@@ -959,8 +959,12 @@ function buildTile(p) {
   return { el: el2, video, audio, av, mic, scr };
 }
 
+// 자동재생이 막힌 소리 — 다음 손짓(누르기·키)에 다시 틀어 본다 (나중에 들어온 참가자의 소리)
+const pendingAudio = new Set();
+
 /** 타일을 화면에서 거둘 때 — 붙여 둔 스트림을 놓아 소리·영상이 남지 않게 */
 function disposeTile(tile) {
+  pendingAudio.delete(tile);
   try { tile.video.srcObject = null; } catch { /* 무시 */ }
   if (tile.audio) {
     try { tile.audio.pause(); tile.audio.srcObject = null; } catch { /* 무시 */ }
@@ -968,10 +972,21 @@ function disposeTile(tile) {
   tile.el.remove();
 }
 
-const playQuietly = (node) => {
+const playQuietly = (node, tile = null) => {
   const pr = node.play();
-  if (pr && pr.catch) pr.catch(() => { /* 자동재생 실패는 무시 (다음 render 에서 다시 시도) */ });
+  if (!pr || !pr.catch) return;
+  pr.catch(() => { if (tile) pendingAudio.add(tile); });
 };
+function retryPendingAudio() {
+  for (const tile of [...pendingAudio]) {
+    const a = tile.audio;
+    if (!a || !a.srcObject) { pendingAudio.delete(tile); continue; }
+    const pr = a.play();
+    if (pr && pr.then) pr.then(() => pendingAudio.delete(tile)).catch(() => { /* 다음 손짓에 또 */ });
+  }
+}
+document.addEventListener('pointerdown', retryPendingAudio, true);
+document.addEventListener('keydown', retryPendingAudio, true);
 
 function updateTile(tile, p) {
   // 남의 소리는 영상 유무·compact 모드와 상관없이 늘 audio 로 붙인다 (음성 회의가 들리게)
@@ -979,9 +994,8 @@ function updateTile(tile, p) {
     const sound = p.stream || null;
     if (tile.audio.srcObject !== sound) {
       tile.audio.srcObject = sound;
-      if (sound) playQuietly(tile.audio);
-    } else if (sound && tile.audio.paused) {
-      playQuietly(tile.audio);
+      if (!sound) pendingAudio.delete(tile);
+      else if (tile.audio.paused) playQuietly(tile.audio, tile);
     }
   }
   const stream = p.video && p.stream ? p.stream : null;
