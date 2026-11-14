@@ -3,31 +3,174 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>별무리 워크스페이스 · 준비 중 · BMR APPS</title>
-<meta name="description" content="별무리 워크스페이스 — 준비 중인 페이지입니다 (BMR APPS)">
+<title>별무리 워크스페이스 · BMR APPS</title>
+<meta name="description" content="별무리학교 교내 워크스페이스 — 채널·스레드·DM, 그리고 AI 조력자 Alter">
 <meta name="theme-color" content="#0abbee">
 <meta name="robots" content="noindex">
 <link rel="icon" href="https://psupfmarnyxontorftio.supabase.co/functions/v1/hub-favicon?slug=workspace">
 </head>
 <body>
-<!-- 준비 중 안내 페이지입니다. 앱을 만들면 이 파일(index.html)을 내 앱 화면으로 바꾸세요.
-     개발에 필요한 정보는 BMR APPS 허브의 '내 서비스 정보 → 개발 정보'와 저장소 README.md 에 있습니다. -->
+<a class="skip" href="#composer-input">메시지 쓰기로 건너뛰기</a>
+
 <header class="top">
-  <a class="mark" href="https://apps.bmrschool.net/" aria-label="BMR APPS 메인 화면"><span>BMR</span><span>APPS</span></a>
+  <a class="mark" href="https://apps.bmrschool.net/" aria-label="BMR APPS 메인 화면">
+    <svg viewBox="0 0 40 40" width="34" height="34" aria-hidden="true" focusable="false">
+      <rect x="1" y="1" width="38" height="38" fill="none" stroke="currentColor" stroke-width="2"></rect>
+      <path d="M8 12h16v9H13l-5 5z" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"></path>
+      <path d="M16 25h14v8l-4-3h-10z" fill="currentColor"></path>
+      <path d="M29 8l1.6 3.4L34 13l-3.4 1.6L29 18l-1.6-3.4L24 13l3.4-1.6z" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round"></path>
+    </svg>
+  </a>
+  <div class="brand">
+    <b data-app-name>별무리 워크스페이스</b>
+    <small>채널 · 스레드 · DM · AI</small>
+  </div>
+  <div class="top-right">
+    <span id="conn" class="conn" hidden><i></i><span id="conn-text">연결됨</span></span>
+    <span id="who" class="who" hidden></span>
+    <button id="logout" class="btn ghost small" type="button" hidden>로그아웃</button>
+    <button id="open-sidebar" class="btn icon mobile-only" type="button" aria-label="채널 목록 열기" aria-controls="sidebar" aria-expanded="false">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" stroke-width="2.5" fill="none"></path></svg>
+    </button>
+  </div>
 </header>
-<main class="wrap">
+
+<!-- 처음 상태: 확인 중 -->
+<div id="boot" class="boot" role="status">
+  <p class="boot-txt">워크스페이스를 여는 중…</p>
+</div>
+
+<!-- 로그인 / 들어가기 -->
+<main id="login" class="login" hidden>
   <section class="hero">
-    <div class="copy">
-      <span class="eyebrow">준비 중</span>
-      <h1 data-app-name>별무리 워크스페이스</h1>
-      <p class="desc" data-app-desc hidden></p>
-      <p class="notice"><b>준비 중인 페이지입니다.</b> 곧 이 주소에서 서비스를 열 예정이에요.</p>
-      <a class="btn" href="https://apps.bmrschool.net/">BMR APPS 서비스 둘러보기</a>
+    <div class="hero-copy">
+      <span class="eyebrow">BMR APPS · 교내 워크스페이스</span>
+      <h1>별무리<br>워크스페이스</h1>
+      <p class="desc">채널로 나누고, 스레드로 이어 가고, 필요할 때 <b>@AI</b> 를 부르세요. 선생님들을 위한 슬랙형 공간입니다.</p>
+      <ul class="feat">
+        <li><b>채널</b> — 일반 · 수업-나눔 · AI-라운지</li>
+        <li><b>스레드</b> — 메시지마다 답글을 모아 보기</li>
+        <li><b>DM</b> — 선생님과 1:1</li>
+        <li><b>Alter</b> — 나만의 AI 조력자</li>
+      </ul>
     </div>
-    <div class="art" aria-hidden="true"><i class="a"></i><i class="b"></i><i class="c"></i><i class="d"></i><i class="e"></i><i class="f"></i></div>
+    <div class="hero-form">
+      <div class="hero-form-in">
+        <h2>시작하기</h2>
+        <p class="lead">BMR APPS 계정(구글)으로 로그인합니다. 별무리학교 메일(<b>@bmrschool.org</b> · <b>@bmrschool.net</b>)은 처음 로그인할 때 자동으로 등록됩니다.</p>
+        <button id="google-login" class="btn btn-google btn-lg" type="button">
+          <span class="g" aria-hidden="true">G</span> 구글로 로그인
+        </button>
+        <button id="preview-login" class="btn btn-preview btn-lg" type="button">
+          미리보기로 둘러보기
+        </button>
+        <p class="tiny">미리보기는 이 브라우저 안에서만 도는 연습용 화면이에요. 실제 데이터는 저장되지 않고, Alter 도 정해진 예시로만 답합니다.</p>
+        <p id="login-msg" class="login-msg" hidden></p>
+        <button id="login-logout" class="btn ghost small" type="button" hidden>지금 계정에서 로그아웃하기</button>
+      </div>
+    </div>
+  </section>
+  <section class="login-foot">
+    <p>로그인은 BMR APPS 공용 계정입니다. 이 앱에서만 로그아웃됩니다.</p>
+    <p><a href="https://apps.bmrschool.net/">BMR APPS</a> · <a href="https://apps.bmrschool.net/guide">개발 가이드</a></p>
   </section>
 </main>
-<footer class="foot">별무리 개발자들이 함께 만들고 나누는 공간 · <a href="https://apps.bmrschool.net/">BMR APPS</a></footer>
+
+<!-- 워크스페이스 -->
+<div id="workspace" class="workspace" hidden>
+  <div id="backdrop" class="backdrop" hidden></div>
+
+  <aside id="sidebar" class="sidebar" aria-label="채널과 멤버">
+    <div class="ws-head">
+      <div class="ws-mark" aria-hidden="true">별</div>
+      <div class="ws-txt">
+        <b>별무리 워크스페이스</b>
+        <small id="ws-sub">충남 금산 · 교내</small>
+      </div>
+    </div>
+    <div class="side-scroll">
+      <section class="side-sec">
+        <h2 class="side-title">채널</h2>
+        <ul id="channel-list" class="side-list"></ul>
+        <button id="new-channel" class="side-add" type="button">＋ 새 채널</button>
+        <form id="new-channel-form" class="new-channel" hidden>
+          <label class="sr" for="new-channel-name">채널 이름</label>
+          <input id="new-channel-name" name="name" maxlength="40" placeholder="예: 평가-나눔" autocomplete="off" required>
+          <label class="sr" for="new-channel-desc">설명</label>
+          <input id="new-channel-desc" name="description" maxlength="200" placeholder="무엇을 나누는 채널인가요? (선택)" autocomplete="off">
+          <div class="row">
+            <button class="btn small" type="submit">만들기</button>
+            <button class="btn ghost small" type="button" id="new-channel-cancel">취소</button>
+          </div>
+        </form>
+      </section>
+      <section class="side-sec">
+        <h2 class="side-title">AI 어시스턴트</h2>
+        <ul id="ai-list" class="side-list"></ul>
+      </section>
+      <section class="side-sec">
+        <h2 class="side-title">다이렉트 메시지</h2>
+        <ul id="dm-list" class="side-list"></ul>
+      </section>
+    </div>
+    <div class="side-foot">
+      <p id="preview-note" class="preview-note" hidden><b>미리보기</b> 연습용 화면 · 저장되지 않음</p>
+      <p id="side-tip" class="side-tip">💡 메시지에서 <b>@AI</b> 를 부르면 Alter 가 바로 답해요.</p>
+    </div>
+  </aside>
+
+  <section class="chat" aria-label="대화">
+    <header class="chat-head">
+      <div class="chat-title">
+        <h1 id="chan-name"># 일반</h1>
+        <p id="chan-desc" class="chan-desc">채널을 고르세요</p>
+      </div>
+      <div class="chat-actions">
+        <span id="chan-kind" class="badge" hidden>AI</span>
+        <span id="chan-count" class="chan-count"></span>
+      </div>
+    </header>
+
+    <div id="chat-body" class="chat-body">
+      <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions text"></div>
+      <div id="chat-empty" class="chat-empty" hidden>
+        <p class="empty-emoji" aria-hidden="true">💬</p>
+        <b>아직 조용하네요</b>
+        <p>첫 메시지를 남겨 보세요. <b>@AI</b> 를 부르면 Alter 가 답글을 달아 줍니다.</p>
+      </div>
+      <div id="chat-error" class="chat-error" hidden></div>
+    </div>
+
+    <form id="composer" class="composer" autocomplete="off">
+      <button type="button" id="insert-ai" class="chip-ai" title="메시지에 @AI 를 넣습니다">@AI</button>
+      <label class="sr" for="composer-input">메시지</label>
+      <textarea id="composer-input" rows="1" maxlength="4000" placeholder="#일반 에 메시지 보내기" enterkeyhint="send"></textarea>
+      <button type="submit" id="send" class="btn send" disabled>보내기</button>
+    </form>
+    <p class="composer-hint"><b>Enter</b> 보내기 · <b>Shift+Enter</b> 줄바꿈 · <b>@AI</b> 부르기</p>
+  </section>
+
+  <aside id="thread" class="thread" aria-label="스레드" hidden>
+    <header class="thread-head">
+      <h2>스레드</h2>
+      <button id="close-thread" class="btn ghost icon" type="button" aria-label="스레드 닫기">✕</button>
+    </header>
+    <div class="thread-body">
+      <div id="thread-parent" class="thread-parent"></div>
+      <div class="thread-divider"><span id="thread-count">답글</span></div>
+      <div id="thread-replies" class="thread-replies"></div>
+    </div>
+    <form id="thread-composer" class="composer thread-composer" autocomplete="off">
+      <button type="button" id="thread-insert-ai" class="chip-ai" title="답글에 @AI 를 넣습니다">@AI</button>
+      <label class="sr" for="thread-input">스레드 답글</label>
+      <textarea id="thread-input" rows="1" maxlength="4000" placeholder="스레드에 답글 달기" enterkeyhint="send"></textarea>
+      <button type="submit" id="thread-send" class="btn send" disabled>답글</button>
+    </form>
+  </aside>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
 <script type="module" src="/src/main.js"></script>
 </body>
 </html>
