@@ -12,10 +12,12 @@ function appendLink(parent, url) {
 }
 
 function inline(text, parent) {
+  // 재귀 호출(굵게 안의 기울임 등)에서 lastIndex 가 섞이지 않도록 호출마다 새 정규식을 씁니다.
+  const re = new RegExp(INLINE.source, 'g');
   let last = 0;
-  INLINE.lastIndex = 0;
   let m;
-  while ((m = INLINE.exec(text)) !== null) {
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].length === 0) { re.lastIndex++; continue; }
     if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
     const tok = m[0];
     if (m[1]) {
