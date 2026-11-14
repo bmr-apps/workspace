@@ -60,6 +60,7 @@ a { color: inherit; }
 .brand b { font-size: 17px; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand small { font-size: 11.5px; font-weight: 700; color: var(--muted); }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.top-right .btn { white-space: nowrap; }
 .conn { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 800; color: var(--muted); border: 1.5px solid var(--line-soft); padding: 2px 7px; white-space: nowrap; }
 .conn i { width: 8px; height: 8px; background: var(--green); display: inline-block; }
 .conn.off i { background: var(--coral); }
@@ -258,6 +259,8 @@ a { color: inherit; }
 @media (max-width: 860px) {
   .mobile-only { display: inline-flex; }
   .brand small { display: none; }
+  .conn { display: none !important; }
+  .top-right { gap: 6px; }
   .bell { font-size: 11.5px; padding: 4px 7px; min-height: 28px; }
   .workspace, .workspace.thread-open { grid-template-columns: minmax(0, 1fr); }
   .sidebar {

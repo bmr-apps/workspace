@@ -557,7 +557,7 @@ function enter(data, mode) {
   $('open-sidebar').hidden = false;
   $('bell').hidden = mode !== 'live';
   if (mode === 'live') refreshBell();
-  $('logout').textContent = mode === 'preview' ? '미리보기 끝내기' : '로그아웃';
+  $('logout').textContent = mode === 'preview' && !narrowScreen() ? '미리보기 끝내기' : (mode === 'preview' ? '나가기' : '로그아웃');
   $('conn').hidden = false;
   $('conn').classList.toggle('preview', mode === 'preview');
   $('conn-text').textContent = mode === 'preview' ? '미리보기' : '연결됨';
@@ -652,6 +652,8 @@ function urlB64ToUint8Array(base64) {
 function pushSupported() {
   return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 }
+
+const narrowScreen = () => window.matchMedia('(max-width: 860px)').matches;
 
 async function currentPushSub() {
   try {
