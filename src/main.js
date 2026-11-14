@@ -358,6 +358,7 @@ async function selectChannel(id) {
   renderSidebar();
   renderHeader();
   updateComposer();
+  renderThread();
   renderMessages(true);
   showChatError('');
   await reload({ silent: false });

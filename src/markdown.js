@@ -38,19 +38,19 @@ function inline(text, parent) {
       parent.appendChild(i);
     } else if (m[6]) {
       const a = document.createElement('a');
-      a.href = m[8];
+      a.href = m[7];
       a.target = '_blank';
       a.rel = 'noopener noreferrer nofollow';
-      a.textContent = m[7];
+      a.textContent = tok.slice(1, tok.indexOf(']('));
       parent.appendChild(a);
-    } else if (m[9]) {
+    } else if (m[8]) {
       let url = tok;
       let tail = '';
       const t = /[),.;:!?]+$/.exec(url);
       if (t) { tail = t[0]; url = url.slice(0, -tail.length); }
       appendLink(parent, url);
       if (tail) parent.appendChild(document.createTextNode(tail));
-    } else if (m[10]) {
+    } else if (m[9]) {
       const s = document.createElement('span');
       s.className = 'mention';
       s.textContent = tok;
