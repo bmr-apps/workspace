@@ -434,7 +434,11 @@ Deno.serve(async (req) => {
           (select count(*)::int from workspace.channels) as channels,
           (select count(*)::int from workspace.members) as members,
           (select count(*)::int from workspace.messages) as messages,
-          (select count(*)::int from workspace.push_subscriptions) as push_subs`) as unknown as { channels: number; members: number; messages: number; push_subs: number }[];
+          (select count(*)::int from workspace.push_subscriptions) as push_subs,
+          (select exists (select 1 from pg_constraint c
+             where c.conrelid = 'workspace.messages'::regclass
+               and c.conname = 'messages_content_check'
+               and pg_get_constraintdef(c.oid) not like '%>= 1%')) as attach_ok`) as unknown as { channels: number; members: number; messages: number; push_subs: number; attach_ok: boolean }[];
         counts = rows?.[0] ?? null;
         schema = true;
       } catch (e) {
