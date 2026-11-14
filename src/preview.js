@@ -337,12 +337,14 @@ export const previewApi = {
       last_message_at: db.messages.length ? db.messages[db.messages.length - 1].created_at : null,
       ai: { key_set: false, model: 'gemini (미리보기)', last: null },
       push: false,
+      mail_ready: true,
+      mail: { ready: true, from: 'workspace@mail.bmrschool.net' },
       bot: { env_token: false },
       preview: true,
     };
   },
 
-  async inviteMember({ email, name, role }) {
+  async inviteMember({ email, name, role, sendEmail }) {
     const clean = String(email || '').trim().toLowerCase();
     if (!emailOk(clean)) throw new Error('이메일 주소를 확인해 주세요.');
     if (db.members.some((m) => m.email === clean)) throw new Error('이미 이 워크스페이스에 들어와 있는 메일이에요.');
@@ -352,7 +354,23 @@ export const previewApi = {
     };
     const i = inviteState.findIndex((x) => x.email === clean);
     if (i >= 0) inviteState[i] = row; else inviteState.unshift(row);
-    return { invite: { ...row } };
+    return {
+      invite: { ...row },
+      mail: sendEmail === false
+        ? { sent: false, skipped: true }
+        : { sent: true, from: 'workspace@mail.bmrschool.net', id: `preview-mail-${Date.now()}` },
+    };
+  },
+
+  async resendInvite(email) {
+    const clean = String(email || '').trim().toLowerCase();
+    if (db.members.some((m) => m.email === clean)) throw new Error('이미 이 워크스페이스에 들어와 있는 메일이에요. 초대 메일을 보낼 필요가 없습니다.');
+    const inv = inviteState.find((x) => x.email === clean);
+    if (!inv) throw new Error('대기 중인 초대가 아니에요. 먼저 초대를 등록해 주세요.');
+    return {
+      ok: true, email: clean, invite: { ...inv },
+      mail: { sent: true, from: 'workspace@mail.bmrschool.net', id: `preview-mail-${Date.now()}` },
+    };
   },
 
   async removeInvite(email) {

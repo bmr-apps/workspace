@@ -1,7 +1,7 @@
 // workspace-fn — 별무리 워크스페이스 서버 함수
 //
 // 주소: https://psupfmarnyxontorftio.supabase.co/functions/v1/workspace-fn/<경로>
-//   GET  /health                                  DB·표 연결 확인
+//   GET  /health                                  DB·표 연결 확인 · 메일 토큰 준비 여부(mail_ready)
 //   GET  /hello                                   부른 사람, AI 열쇠 설정 여부
 //   GET  /bootstrap                               나·멤버·채널 목록 (기본 채널과 내 AI 방을 만들어 줌)
 //   POST /channels      {kind:'channel', name, description} | {kind:'dm', target_user_id}
@@ -9,7 +9,7 @@
 //   POST /messages      {channel_id, content, parent_id?, attachments?}  메시지 쓰기 (+ @AI 면 Alter 답글)
 //
 // 관리자 콘솔 (자세한 것은 admin.ts):
-//   GET  /admin/overview · GET /admin/members · POST /admin/invites · DELETE /admin/invites/:email
+//   GET  /admin/overview · GET /admin/members · POST /admin/invites (+ 초대 메일) · POST /admin/invites/resend · DELETE /admin/invites/:email
 //   POST /admin/members/update {user_id, role?, disabled?}    관리자 지정·해제 · 차단·해제
 //   POST /channels/update · DELETE /channels/:id              공개 채널 이름·설명 고치기 · 지우기
 //   POST /messages/pin {channel_id, message_id|null}          공지 고정·해제
@@ -547,7 +547,7 @@ Deno.serve(async (req) => {
       } catch { bot = null; }
       return json(req, 200, {
         ok: true, db: true, schema, ...(counts || {}), ai_last: lastAiResult(), push: pushAvailable(),
-        mcp: true, bot_api: true, bot, function: FN,
+        mail_ready: Boolean(secret('MAIL_TOKEN')), mcp: true, bot_api: true, bot, function: FN,
       });
     }
 

@@ -3,7 +3,8 @@
 // 경로 (관리자만. 단 메시지 지우기는 쓴 사람도 할 수 있습니다):
 //   GET    /admin/overview                          수 세기 · AI · 푸시 상태 (비밀값은 내보내지 않음)
 //   GET    /admin/members                           멤버 목록 + 아직 들어오지 않은 초대
-//   POST   /admin/invites {email,name?,role?}       바깥 메일 초대 (그 메일로 처음 로그인하면 멤버가 됨)
+//   POST   /admin/invites {email,name?,role?,send_email?}   바깥 메일 초대 + 초대 메일 발송 (기본 발송, send_email:false 면 등록만)
+//   POST   /admin/invites/resend {email}            대기 중인 초대의 메일 다시 보내기
 //   DELETE /admin/invites/:email                    초대 취소
 //   POST   /admin/invites/remove {email}            초대 취소 (같은 일, 본문으로)
 //   POST|PATCH /admin/members/update {user_id, role?, disabled?}
@@ -22,11 +23,15 @@ import type postgres from 'npm:postgres@3.4.5';
 import { HttpError } from './http.ts';
 import { hasKey as aiHasKey, currentModel, lastAiResult } from './ai.ts';
 import { pushAvailable } from './push.ts';
+import { sendMail, inviteMail, mailReady, MAIL_FROM, MAIL_FROM_NAME } from './mail.ts';
 
 type Sql = ReturnType<typeof postgres>;
 
 export type AdminMe = { id: string; email: string; name: string; role: 'member' | 'admin' };
 export type AdminReply = { status: number; body: unknown };
+
+/** 초대 메일 발송 결과 — 초대 자체는 메일이 실패해도 등록된 상태로 남긴다 */
+type MailOut = { sent: boolean; from?: string; id?: string; error?: string; skipped?: boolean };
 
 const SCH = 'workspace';
 const MAX_BODY = 16_384;
@@ -159,6 +164,8 @@ export async function adminRoute(sql: Sql, req: Request, path: string, me: Admin
         last_message_at: iso(r.last_message_at),
         ai: { key_set: aiHasKey(), model: currentModel(), last: lastAiResult() },
         push: pushAvailable(),
+        mail_ready: mailReady(),
+        mail: { ready: mailReady(), from: MAIL_FROM },
         bot: { env_token: Boolean(Deno.env.get('WORKSPACE_BOT_TOKEN')) },
         now: new Date().toISOString(),
       },
@@ -193,13 +200,40 @@ export async function adminRoute(sql: Sql, req: Request, path: string, me: Admin
     if (!EMAIL_RE.test(email)) throw new HttpError(400, '이메일 주소를 확인해 주세요.', 'bad_email');
     const role = b.role === 'admin' ? 'admin' : 'member';
     const name = clean(b.name, 40);
+    // 기본은 메일도 함께. 관리자가 체크를 풀면(send_email:false) 초대만 등록한다.
+    const wantMail = b.send_email !== false;
     const [already] = await sql`select 1 from ${sql(SCH)}.members where email = ${email}`;
     if (already) throw new HttpError(409, '이미 이 워크스페이스에 들어와 있는 메일이에요.', 'already_member');
     await sql`insert into ${sql(SCH)}.invites (email, name, role, invited_by)
       values (${email}, ${name}, ${role}, ${me.id})
       on conflict (email) do update set name = excluded.name, role = excluded.role,
         invited_by = excluded.invited_by, created_at = now()`;
-    return { status: 201, body: { invite: { email, name, role, created_at: new Date().toISOString() } } };
+    const invite = { email, name, role, created_at: new Date().toISOString() };
+    const mail: MailOut = wantMail ? await sendInviteMail(me, email, role) : { sent: false, skipped: true };
+    return { status: 201, body: { invite, mail } };
+  }
+
+  // ---------- 초대 메일 다시 보내기 ----------
+  if (path === '/admin/invites/resend' && M === 'POST') {
+    const b = await readBody(req);
+    const email = emailOf(b.email);
+    if (!EMAIL_RE.test(email)) throw new HttpError(400, '이메일 주소를 확인해 주세요.', 'bad_email');
+    const [already] = await sql`select 1 from ${sql(SCH)}.members where email = ${email}`;
+    if (already) throw new HttpError(409, '이미 이 워크스페이스에 들어와 있는 메일이에요. 초대 메일을 보낼 필요가 없습니다.', 'already_member');
+    const [inv] = await sql`select email, name, role, created_at from ${sql(SCH)}.invites where email = ${email}`;
+    if (!inv) throw new HttpError(404, '대기 중인 초대가 아니에요. 먼저 초대를 등록해 주세요.', 'no_invite');
+    const role = inv.role === 'admin' ? 'admin' as const : 'member' as const;
+    const mail = await sendInviteMail(me, email, role);
+    return {
+      status: 200,
+      body: {
+        ok: mail.sent, email, mail,
+        invite: {
+          email, name: String(inv.name ?? ''), role,
+          created_at: iso(inv.created_at),
+        },
+      },
+    };
   }
 
   if (path === '/admin/invites/remove' && (M === 'POST' || M === 'DELETE')) {
@@ -302,6 +336,27 @@ export async function adminRoute(sql: Sql, req: Request, path: string, me: Admin
   }
 
   return null;
+}
+
+// ---------- 초대 메일 ----------
+/**
+ * 초대 메일을 보낸다. 무슨 일이 있어도 던지지 않고 결과만 돌려준다 —
+ * 메일이 안 나가도 초대는 그대로 남아야 하기 때문. 실패 이유는 화면에 그대로 보여 준다.
+ */
+async function sendInviteMail(me: AdminMe, email: string, role: 'member' | 'admin'): Promise<MailOut> {
+  if (!mailReady()) {
+    return { sent: false, error: 'WORKSPACE_MAIL_TOKEN 미설정 — 허브에서 이 앱의 메일 토큰을 넣어야 발송됩니다.' };
+  }
+  try {
+    const msg = inviteMail({ inviter: me.name || me.email || '관리자', email, role });
+    const r = await sendMail({
+      to: email, subject: msg.subject, html: msg.html, text: msg.text, from_name: MAIL_FROM_NAME,
+    });
+    return { sent: true, from: r.from || MAIL_FROM, id: r.id || undefined };
+  } catch (e) {
+    const raw = String((e as Error)?.message ?? e).replace(/\s+/g, ' ').trim();
+    return { sent: false, error: (raw || '메일을 보내지 못했습니다.').slice(0, 300) };
+  }
 }
 
 // ---------- 초대 취소 ----------

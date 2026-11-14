@@ -257,11 +257,12 @@
                 <option value="member" selected>멤버</option>
                 <option value="admin">관리자</option>
               </select>
-              <button class="btn" type="submit" id="invite-btn">초대 등록</button>
+              <label class="invite-check"><input type="checkbox" id="invite-mail" checked> <span>✉️ 초대 메일 함께 보내기</span></label>
+              <button class="btn" type="submit" id="invite-btn">초대 보내기</button>
             </div>
           </form>
           <p id="invite-note" class="modal-note" hidden></p>
-          <p class="modal-tiny">초대 메일은 따로 보내지 않아요. 그분이 <b>이 메일의 구글 계정</b>으로 로그인하면 바로 들어오고, 초대는 한 번 쓰고 지워집니다. 학교 메일(<code>@bmrschool.org</code> · <code>@bmrschool.net</code>)은 초대 없이도 들어옵니다.</p>
+          <p class="modal-tiny">초대 시 안내 메일을 보내고, 초대된 이메일의 <b>Google 계정</b>으로 로그인하면 바로 참여할 수 있어요. 메일은 <code>workspace@mail.bmrschool.net</code> 에서 나가고, 이미 보낸 초대는 목록의 <b>📧 재발송</b>으로 다시 보낼 수 있습니다. 학교 메일(<code>@bmrschool.org</code> · <code>@bmrschool.net</code>)은 초대 없이도 들어옵니다.</p>
         </section>
         <section class="link-sec">
           <h3>대기 중인 초대</h3>

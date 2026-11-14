@@ -1028,6 +1028,11 @@ function renderInvites() {
     tags.appendChild(tag(`초대 ${fmtWhen(inv.created_at)}`, 'quiet'));
     main.appendChild(tags);
     row.appendChild(main);
+    const mail = el('button', 'btn ghost small', '📧 재발송');
+    mail.type = 'button';
+    mail.title = `${inv.email} 로 초대 메일 다시 보내기`;
+    mail.addEventListener('click', () => resendInvite(inv, mail));
+    row.appendChild(mail);
     const b = el('button', 'btn ghost small', '초대 취소');
     b.type = 'button';
     b.title = `${inv.email} 초대를 취소`;
@@ -1146,20 +1151,54 @@ async function sendInvite(e) {
   const emailIn = $('invite-email');
   const nameIn = $('invite-name');
   const roleIn = $('invite-role');
+  const mailIn = $('invite-mail');
   const email = emailIn.value.trim();
   if (!email) { emailIn.focus(); return; }
+  const sendEmail = mailIn ? mailIn.checked : true;
   const btn = $('invite-btn');
+  const label = btn.textContent;
   btn.disabled = true;
+  btn.textContent = sendEmail ? '보내는 중…' : '등록 중…';
   setInviteNote('');
   try {
-    await S.api.inviteMember({ email, name: nameIn.value.trim(), role: roleIn.value });
+    const res = await S.api.inviteMember({ email, name: nameIn.value.trim(), role: roleIn.value, sendEmail });
     $('invite-form').reset();
-    setInviteNote(`${email} 님을 초대했어요. 그 메일의 구글 계정으로 로그인하면 바로 들어옵니다.`);
+    const m = (res && res.mail) || {};
+    if (!sendEmail) {
+      setInviteNote(`${email} 님을 초대했어요. 메일은 보내지 않았습니다 (목록에서 📧 재발송으로 언제든 보낼 수 있어요).`);
+    } else if (m.sent) {
+      setInviteNote(`초대 등록 & 이메일 발송 완료 (${m.from || 'workspace@mail.bmrschool.net'} → ${email})`);
+    } else {
+      setInviteNote(`초대는 등록됐어요 (메일 미발송: ${m.error || '알 수 없는 이유'})`, true);
+    }
     loadAdminMembers();
   } catch (err) {
     setInviteNote(err.message || '초대하지 못했어요.', true);
   } finally {
     btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+/** 대기 중인 초대의 메일을 다시 보낸다 — 초대 자체는 그대로 둔다 */
+async function resendInvite(inv, btn) {
+  if (btn) btn.disabled = true;
+  const label = btn ? btn.textContent : '';
+  if (btn) btn.textContent = '보내는 중…';
+  try {
+    const res = await S.api.resendInvite(inv.email);
+    const m = (res && res.mail) || {};
+    if (m.sent) {
+      setInviteNote(`초대 메일을 다시 보냈어요 (${m.from || 'workspace@mail.bmrschool.net'} → ${inv.email})`);
+      toast('📧 초대 메일을 다시 보냈어요.');
+    } else {
+      setInviteNote(`메일을 보내지 못했어요: ${m.error || '알 수 없는 이유'}`, true);
+      toast('메일을 보내지 못했어요.', 'err');
+    }
+  } catch (e) {
+    setInviteNote(e.message || '메일을 다시 보내지 못했어요.', true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
   }
 }
 
@@ -1298,6 +1337,7 @@ function renderOverview(o) {
   const aiSrc = last ? (last.source === 'gemini' ? '성공' : last.source === 'fallback' ? '안내 문구' : '오류') : '아직 없음';
   box.appendChild(sysCard('AI 모델', ai.model || '—', ai.key_set ? '열쇠 설정됨' : '열쇠 없음'));
   box.appendChild(sysCard('AI 마지막 답', aiSrc, last ? `${fmtWhen(last.at)}` : '메시지에서 @AI 를 불러 보세요'));
+  box.appendChild(sysCard('✉️ 초대 메일', o && o.mail_ready ? '연결됨' : '토큰 필요', o && o.mail_ready ? 'workspace@mail.bmrschool.net' : '허브에서 메일 토큰 설정'));
   box.appendChild(sysCard('푸시 알림', o && o.push ? '켜짐' : '꺼짐', `구독 ${c.push_subs ?? 0}개`));
   box.appendChild(sysCard('봇 열쇠', `${c.bot_tokens ?? 0}개 사용 중`, o && o.bot && o.bot.env_token ? '서버 열쇠도 켜져 있음' : ''));
   box.appendChild(sysCard('멤버', `${c.members ?? 0}명`, `관리자 ${c.admins ?? 0} · 차단 ${c.disabled ?? 0}`));

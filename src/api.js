@@ -108,9 +108,15 @@ export const liveApi = {
 
   adminMembers: () => call('/admin/members'),
 
-  inviteMember: ({ email, name, role }) => call('/admin/invites', {
+  inviteMember: ({ email, name, role, sendEmail }) => call('/admin/invites', {
     method: 'POST',
-    body: { email, name, role },
+    // send_email 을 생략하면 서버가 '보냄'으로 본다. 체크를 푼 경우에만 false 로 보낸다.
+    body: { email, name, role, ...(sendEmail === false ? { send_email: false } : {}) },
+  }),
+
+  resendInvite: (email) => call('/admin/invites/resend', {
+    method: 'POST',
+    body: { email },
   }),
 
   removeInvite: (email) => call(`/admin/invites/${q(email)}`, { method: 'DELETE' }),
