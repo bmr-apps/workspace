@@ -9,7 +9,7 @@
 - **Alter(AI)** — `🤖 Alter (AI)` 방은 나만의 AI 방이고, 어느 채널에서든 메시지에 `@AI` 를 부르면 그 메시지의 스레드에 답글이 달립니다.
 - **음성·화상 회의(허들)** — 채널·DM 상단의 `🎙️ 음성` / `📹 화상` 으로 들어갑니다. 화면끼리 P2P(WebRTC)로 연결되고, 신호만 Supabase Realtime(broadcast·presence)을 씁니다.
 - **봇 API · MCP** — 관리자가 화면 오른쪽 위 `🛠️ 관리 → 🔑 연동·시스템` 에서 열쇠를 발급하면 Alter(피클)·Cursor 같은 도구가 REST API 와 표준 MCP(`/mcp`)로 **공개 채널**을 읽고 글을 쓸 수 있습니다 (DM·AI 방은 열리지 않습니다).
-- **관리자 콘솔(🛠️ 관리)** — 관리자에게 세 가지를 모아 둡니다. **👥 멤버·초대**(관리자 지정·해제, 접근 차단·해제, 바깥 메일 초대) · **💬 채널 관리**(이름·설명 고치기, 채널 지우기) · **🔑 연동·시스템**(연동 열쇠 발급·폐기, AI·푸시·사용량 현황). 채널에서는 관리자가 메시지를 **📌 공지로 고정**해 채널 위 띠로 모두에게 보이게 하고, 쓴 사람이나 관리자가 **🗑️ 메시지를 지울** 수 있습니다.
+- **관리자 콘솔(🛠️ 관리)** — 관리자에게 세 가지를 모아 둡니다. **👥 멤버·초대**(관리자 지정·해제, 접근 차단·해제, 바깥 메일 초대와 **초대 메일 발송·📧 재발송**) · **💬 채널 관리**(이름·설명 고치기, 채널 지우기) · **🔑 연동·시스템**(연동 열쇠 발급·폐기, AI·푸시·메일·사용량 현황). 채널에서는 관리자가 메시지를 **📌 공지로 고정**해 채널 위 띠로 모두에게 보이게 하고, 쓴 사람이나 관리자가 **🗑️ 메시지를 지울** 수 있습니다.
 - 로그인은 BMR APPS 공용 구글 계정입니다. `@bmrschool.org` · `@bmrschool.net` 메일은 처음 로그인할 때 멤버로 자동 등록되고, **맨 처음 로그인한 사람이 관리자**가 됩니다. 그 밖의 계정은 관리자가 **🛠️ 관리 → 멤버·초대** 에서 초대해야 들어올 수 있습니다.
 - **미리보기로 둘러보기** 버튼은 서버 없이 화면을 연습하는 모드입니다(가짜 데이터·예시 Alter 답변, 저장 안 됨).
 
@@ -459,11 +459,23 @@ curl -s https://psupfmarnyxontorftio.supabase.co/functions/v1/workspace-fn/bot/c
 | 방식 | 주소 | 하는 일 |
 |---|---|---|
 | REST | `GET /admin/members` | 멤버 목록(역할·차단·최근 접속) + 아직 들어오지 않은 초대 |
-| REST | `POST /admin/invites` `{email,name?,role?}` | 바깥 메일 초대 (소문자로 저장) |
+| REST | `POST /admin/invites` `{email,name?,role?,send_email?}` | 바깥 메일 초대 (소문자로 저장) + 초대 메일 발송 (기본 발송, `send_email:false` 면 등록만) |
+| REST | `POST /admin/invites/resend` `{email}` | 대기 중인 초대의 메일 다시 보내기 |
 | REST | `DELETE /admin/invites/:email` · `POST /admin/invites/remove` `{email}` | 초대 취소 |
 | REST | `POST /admin/members/update` `{user_id, role?, disabled?}` · `PATCH /admin/members/:id` | 관리자 지정·해제 · 차단·해제 |
 
-- **초대는 메일을 보내지 않습니다.** `workspace.invites` 에 메일만 적어 두고, 그 메일의 구글 계정으로 **처음 로그인할 때** 초대한 역할로 멤버가 되고 초대 줄은 지워집니다. 학교 메일(`@bmrschool.org`·`.net`)은 초대 없이도 들어옵니다.
+- **초대하면 안내 메일도 함께 보냅니다** (`supabase/functions/workspace-fn/mail.ts` → 허브 `hub-mail`). 보내는 주소는 허브가 정한 `workspace@mail.bmrschool.net`, 표시 이름은 `별무리 워크스페이스` 입니다. 초대 자체는 `workspace.invites` 에 먼저 적어 두고, 메일이 실패해도 초대는 그대로 남습니다 — 응답의 `mail: { sent, from?, id?, error?, skipped? }` 로 결과를 알려 줍니다.
+- **메일 토큰이 없으면 발송만 쉬고 초대는 그대로 등록됩니다.** 함수 비밀값 `WORKSPACE_MAIL_TOKEN` 이 없으면 `mail.sent=false` 와 이유(`WORKSPACE_MAIL_TOKEN 미설정 …`)가 돌아오고, `GET /health`·`GET /admin/overview` 의 `mail_ready` 가 `false` 로 보입니다. 값 자체는 어느 응답에도 나가지 않습니다.
+- **메일을 켜는 순서** (허브 관리자 몫): ① 무작위 토큰을 만들고 그 SHA-256 해시를 `bmr_admin.mail_tokens` 에 이 앱(`public.apps` 의 `slug='workspace'`)으로 넣습니다. ② 허브 → 내 서비스 → 이 앱 → **개발자 셀프서비스 → 함수 비밀값** 에 이름 `WORKSPACE_MAIL_TOKEN`, 값은 ①의 원문 토큰을 넣습니다. ③ `/health` 의 `mail_ready` 가 `true` 가 되면 초대 메일이 나갑니다.
+  ```bash
+  node -e "const c=require('crypto');const t=c.randomBytes(32).toString('hex');console.log('token:',t);console.log('sha256:',c.createHash('sha256').update(t).digest('hex'))"
+  ```
+  ```sql
+  insert into bmr_admin.mail_tokens (app_id, token_hash)
+  select id, '<sha256>' from public.apps where slug = 'workspace'
+  on conflict (app_id) do update set token_hash = excluded.token_hash, set_at = now();
+  ```
+- 초대 메일은 그 메일의 구글 계정으로 **처음 로그인할 때** 초대한 역할로 멤버가 되고 초대 줄은 지워집니다. 학교 메일(`@bmrschool.org`·`.net`)은 초대 없이도 들어옵니다.
 - **차단**은 표에서 지우지 않고 `workspace.members.disabled_at` 만 채웁니다. 그 계정은 로그인해도 함수가 `403 "관리자에 의해 접근이 제한된 계정입니다."` 로 돌려보냅니다. 풀면 바로 다시 들어옵니다.
 - **내 계정은 못 바꿉니다.** 스스로 관리자 권한을 내리거나 자기를 차단하는 요청은 `400` 입니다 (관리자가 하나도 남지 않는 일을 막습니다).
 
@@ -485,7 +497,7 @@ curl -s https://psupfmarnyxontorftio.supabase.co/functions/v1/workspace-fn/bot/c
 
 | 방식 | 주소 | 하는 일 |
 |---|---|---|
-| REST | `GET /admin/overview` | 멤버·초대·채널·메시지·푸시 구독·열쇠 수, AI 모델·열쇠 상태·마지막 AI 응답, 푸시 가능 여부 |
+| REST | `GET /admin/overview` | 멤버·초대·채널·메시지·푸시 구독·열쇠 수, AI 모델·열쇠 상태·마지막 AI 응답, 푸시 가능 여부, `mail_ready`(초대 메일 토큰 준비 여부) |
 
 - 값은 숫자·상태만 나갑니다. **열쇠 원문·비밀값은 어떤 경우에도 화면으로 나가지 않습니다.**
 - 미리보기 모드에서도 탭 3개·공지 고정·메시지 삭제를 모두 연습할 수 있습니다(가짜 데이터, 새로 고치면 처음 상태).
