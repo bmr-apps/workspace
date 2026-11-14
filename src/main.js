@@ -33,7 +33,7 @@ const S = {
   starting: false,
   aiKeySet: true,
   hasSession: false,
-  unread: 0,
+  unread: {},
   baseTitle: '별무리 워크스페이스 · BMR APPS',
   unsub: null,
   poll: null,
@@ -84,18 +84,61 @@ function showChatError(msg) {
   e.hidden = !msg;
 }
 
-// ---------- 제목 배지(안 읽은 메시지) ----------
-function setTitle() {
-  document.title = S.unread > 0 ? `(${S.unread}) 별무리 워크스페이스` : S.baseTitle;
+// ---------- 안 읽은 배지(채널·DM·제목·메뉴) ----------
+function totalUnread() {
+  return Object.values(S.unread || {}).reduce((a, b) => a + (Number(b) || 0), 0);
 }
-function addUnread(n = 1) {
-  if (!n) return;
-  S.unread += n;
-  setTitle();
+function updateUnreadUi() {
+  const total = totalUnread();
+  document.title = total > 0 ? `(${total > 99 ? '99+' : total}) 별무리 워크스페이스` : S.baseTitle;
+  const mb = $('menu-badge');
+  if (mb) {
+    mb.hidden = total === 0;
+    mb.textContent = total > 99 ? '99+' : String(total);
+  }
+}
+function setUnreadMap(list) {
+  const map = {};
+  for (const u of list || []) {
+    if (!u || u.channel_id == null) continue;
+    map[Number(u.channel_id)] = Number(u.unread || 0);
+  }
+  // 지금 보고 있는 채널은 안 읽은 것이 없다
+  if (S.channelId && document.visibilityState === 'visible') map[S.channelId] = 0;
+  const changed = JSON.stringify(map) !== JSON.stringify(S.unread);
+  S.unread = map;
+  if (changed) renderSidebar();
+  updateUnreadUi();
+}
+function bumpUnread(channelId) {
+  if (!channelId) return;
+  S.unread[channelId] = (S.unread[channelId] || 0) + 1;
+  renderSidebar();
+  updateUnreadUi();
 }
 function incoming(msg) {
   if (!msg || (S.me && msg.user_id === S.me.id)) return;
-  if (document.visibilityState === 'hidden' || (typeof msg.channel_id === 'number' && msg.channel_id !== S.channelId)) addUnread(1);
+  const cid = Number(msg.channel_id);
+  if (!cid) return;
+  if (document.visibilityState === 'visible' && cid === S.channelId) { scheduleMarkRead(); return; }
+  bumpUnread(cid);
+}
+
+// ---------- 읽음 처리 ----------
+let markTimer = null;
+function scheduleMarkRead() {
+  clearTimeout(markTimer);
+  markTimer = setTimeout(() => { if (S.channelId) markRead(S.channelId); }, 400);
+}
+async function markRead(channelId) {
+  if (!channelId) return;
+  if (S.unread[channelId]) {
+    S.unread[channelId] = 0;
+    renderSidebar();
+    updateUnreadUi();
+  }
+  if (S.mode !== 'live' || !S.api) return;
+  try { await S.api.markRead(channelId); } catch { /* 다음 폴링에서 다시 맞춘다 */ }
 }
 const currentChannel = () => S.channels.find((c) => c.id === S.channelId) || null;
 
@@ -112,12 +155,13 @@ function renderWho() {
   w.hidden = false;
 }
 
-function sideItem({ label, hash, avatar, ai, active, onClick, title }) {
+function sideItem({ label, hash, avatar, ai, active, onClick, title, unread }) {
   const li = document.createElement('li');
   const b = document.createElement('button');
   b.type = 'button';
-  b.className = 'side-item' + (active ? ' on' : '');
-  if (title) b.title = title;
+  const n = Number(unread || 0);
+  b.className = 'side-item' + (active ? ' on' : '') + (n > 0 ? ' has-unread' : '');
+  if (title) b.title = title + (n > 0 ? ` · 안 읽은 메시지 ${n}개` : '');
   if (avatar != null) {
     const a = el('span', 'side-av' + (ai ? ' ai' : ''), avatar);
     if (ai) a.style.background = '#ffdc1a';
@@ -126,6 +170,7 @@ function sideItem({ label, hash, avatar, ai, active, onClick, title }) {
     b.appendChild(el('span', 'hash', hash || '#'));
   }
   b.appendChild(el('span', 'nm', label));
+  if (n > 0) b.appendChild(el('span', 'badge-n', n > 99 ? '99+' : String(n)));
   b.addEventListener('click', onClick);
   li.appendChild(b);
   return li;
@@ -140,7 +185,7 @@ function renderSidebar() {
   cl.textContent = '';
   for (const c of chans) {
     cl.appendChild(sideItem({
-      label: c.name, hash: '#', active: c.id === S.channelId,
+      label: c.name, hash: '#', active: c.id === S.channelId, unread: S.unread[c.id] || 0,
       onClick: () => selectChannel(c.id), title: c.description || '#' + c.name,
     }));
   }
@@ -149,7 +194,7 @@ function renderSidebar() {
   al.textContent = '';
   for (const c of ais) {
     al.appendChild(sideItem({
-      label: 'Alter', avatar: 'AI', ai: true, active: c.id === S.channelId,
+      label: 'Alter', avatar: 'AI', ai: true, active: c.id === S.channelId, unread: S.unread[c.id] || 0,
       onClick: () => selectChannel(c.id), title: 'Alter 와 1:1 대화',
     }));
   }
@@ -165,6 +210,7 @@ function renderSidebar() {
       label: who ? who.name : c.name,
       avatar: firstChar(who ? who.name : c.name),
       active: c.id === S.channelId,
+      unread: S.unread[c.id] || 0,
       onClick: () => selectChannel(c.id),
       title: who ? who.email : c.name,
     }));
@@ -355,6 +401,7 @@ async function reload({ silent = true } = {}) {
       renderMessages();
       if (t) renderThread();
     }
+    if (Array.isArray(res.unread)) setUnreadMap(res.unread);
   } catch (e) {
     if (!silent) showChatError(e.message || '메시지를 불러오지 못했어요.');
   }
@@ -378,7 +425,12 @@ async function selectChannel(id) {
   renderThread();
   renderMessages(true);
   showChatError('');
+  // 지금 채널을 보고 있으니 안 읽음 배지를 지우고 서버에도 기록
+  S.unread[id] = 0;
+  renderSidebar();
+  updateUnreadUi();
   await reload({ silent: false });
+  markRead(id);
 }
 
 async function openDmWith(member) {
@@ -540,6 +592,8 @@ function teardown() {
   S.starting = false;
   S.sig = '';
   S.hasSession = false;
+  S.unread = {};
+  updateUnreadUi();
 }
 
 function enter(data, mode) {
@@ -550,6 +604,8 @@ function enter(data, mode) {
   S.aiKeySet = data.gemini_key_set !== false;
   S.hasSession = mode === 'live';
   S.sig = '';
+  S.unread = {};
+  for (const c of S.channels) if (c.unread) S.unread[c.id] = Number(c.unread);
   $('boot').hidden = true;
   $('login').hidden = true;
   $('workspace').hidden = false;
@@ -564,6 +620,7 @@ function enter(data, mode) {
   renderWho();
   renderSidebar();
   updateComposer();
+  updateUnreadUi();
 
   const saved = Number(local.get('last-channel', 0));
   const first = S.channels.find((c) => c.kind === 'channel') || S.channels[0];
@@ -581,8 +638,7 @@ function enter(data, mode) {
       if (document.visibilityState === 'visible') reload();
     }, 5000);
   }
-  S.unread = 0;
-  setTitle();
+  updateUnreadUi();
 }
 
 async function startLive() {
@@ -745,9 +801,8 @@ function bind() {
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
-    S.unread = 0;
-    setTitle();
     if (S.mode === 'live') { reload(); refreshBell(); }
+    if (S.channelId) markRead(S.channelId);
   });
 
   $('login-logout').addEventListener('click', async () => {
@@ -850,7 +905,7 @@ function authRedirectError() {
 async function boot() {
   applyAppInfo(' · BMR APPS').then(() => {
     S.baseTitle = document.title || S.baseTitle;
-    setTitle();
+    updateUnreadUi();
   }).catch(() => { /* 허브 이름을 못 읽어도 그대로 */ });
   bind();
   registerSw();

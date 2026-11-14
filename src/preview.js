@@ -56,8 +56,15 @@ function seedMessages() {
 }
 
 let db = null;
+let unreadState = {};
 function reset() {
   db = { channels: CHANNELS.map((c) => ({ ...c })), messages: seedMessages() };
+  // 연습용 안 읽은 배지 (2번 #수업-나눔 2개, 5번 김하늘 DM 1개)
+  unreadState = { 2: 2, 5: 1 };
+}
+
+function unreadList() {
+  return Object.entries(unreadState).map(([id, n]) => ({ channel_id: Number(id), unread: Number(n), last_id: 0 }));
 }
 
 function aiReply(text, channelName) {
@@ -140,7 +147,7 @@ export const previewApi = {
     return {
       me: { ...ME, last_seen_at: iso(Date.now()) },
       members: MEMBERS.map((m) => ({ ...m })),
-      channels: db.channels.map((c) => ({ ...c })),
+      channels: db.channels.map((c) => ({ ...c, unread: unreadState[c.id] || 0 })),
       gemini_key_set: false,
       preview: true,
     };
@@ -152,6 +159,7 @@ export const previewApi = {
       channel_id: Number(channelId),
       messages: db.messages.filter((m) => m.channel_id === Number(channelId) && m.parent_id == null)
         .sort((a, b) => a.id - b.id).map(publicMessage),
+      unread: unreadList(),
     };
   },
 
@@ -162,7 +170,13 @@ export const previewApi = {
       channel_id: Number(channelId),
       parent: publicMessage(parent),
       messages: db.messages.filter((m) => m.parent_id === Number(parentId)).sort((a, b) => a.id - b.id).map(publicMessage),
+      unread: unreadList(),
     };
+  },
+
+  async markRead(channelId) {
+    delete unreadState[Number(channelId)];
+    return { ok: true, channel_id: Number(channelId), last_read_id: 0 };
   },
 
   async post({ channelId, content, parentId }) {

@@ -109,6 +109,16 @@ export const DDL: string[] = [
   `alter table workspace.push_subscriptions enable row level security`,
   `alter table workspace.push_config enable row level security`,
 
+  // ---------- 읽음 표시 — 채널별로 마지막으로 본 메시지 번호 (함수만 읽고 쓴다) ----------
+  `create table if not exists workspace.channel_reads (
+    user_id uuid not null,
+    channel_id bigint not null references workspace.channels(id) on delete cascade,
+    last_read_id bigint not null default 0,
+    updated_at timestamptz not null default now(),
+    primary key (user_id, channel_id)
+  )`,
+  `alter table workspace.channel_reads enable row level security`,
+
   // 실시간 구독용 (프로젝트 설정에 따라 권한이 없을 수 있음 — 실패해도 앱은 폴링으로 동작)
   `do $$ begin
      alter publication supabase_realtime add table workspace.messages;
@@ -131,4 +141,5 @@ export const CHECK_TABLES = `select
   to_regclass('workspace.channels')           is not null as channels,
   to_regclass('workspace.messages')           is not null as messages,
   to_regclass('workspace.push_subscriptions') is not null as push,
-  to_regclass('workspace.push_config')        is not null as push_config`;
+  to_regclass('workspace.push_config')        is not null as push_config,
+  to_regclass('workspace.channel_reads')      is not null as reads`;

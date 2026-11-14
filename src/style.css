@@ -41,7 +41,12 @@ a { color: inherit; }
 .btn.ghost:hover:not(:disabled) { background: var(--yellow); }
 .btn.small { min-height: 30px; padding: 4px 10px; font-size: 12.5px; }
 .btn.btn-lg { min-height: 48px; padding: 10px 20px; font-size: 16px; }
-.btn.icon { min-height: 38px; width: 38px; padding: 0; }
+.btn.icon { min-height: 38px; width: 38px; padding: 0; position: relative; }
+.menu-badge {
+  position: absolute; top: -7px; right: -7px; min-width: 18px; height: 18px; padding: 0 4px;
+  background: var(--coral); color: #000; border: 1.5px solid #000; font-size: 10.5px; font-weight: 900;
+  display: grid; place-items: center; line-height: 1;
+}
 .btn-google { background: #fff; color: #000; box-shadow: var(--hard-sm); font-size: 15.5px; width: 100%; }
 .btn-google:hover:not(:disabled) { background: var(--green); box-shadow: 6px 6px 0 #000; }
 .btn-google .g { display: inline-grid; place-items: center; width: 24px; height: 24px; background: var(--yellow); border: var(--border); font-weight: 900; font-size: 13px; }
@@ -127,6 +132,13 @@ a { color: inherit; }
 .side-item .hash { font-weight: 900; color: var(--soft); flex: none; width: 12px; text-align: center; }
 .side-item.on .hash { color: #000; }
 .side-item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-item.has-unread .nm { font-weight: 900; }
+.side-item.has-unread .hash, .side-item.has-unread .side-av { color: #000; }
+.badge-n {
+  flex: none; min-width: 20px; height: 20px; padding: 0 5px; display: inline-grid; place-items: center;
+  background: var(--coral); color: #000; border: 1.5px solid #000; font-size: 11.5px; font-weight: 900; line-height: 1;
+}
+.side-item.on .badge-n { background: #000; color: var(--yellow); border-color: #000; }
 .side-item .dot { width: 7px; height: 7px; flex: none; background: var(--coral); }
 .side-av { width: 22px; height: 22px; flex: none; display: inline-grid; place-items: center; border: 1.5px solid #000; font-size: 11px; font-weight: 900; color: #000; }
 .side-av.ai { background: var(--yellow); }

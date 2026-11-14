@@ -86,4 +86,10 @@ export const liveApi = {
     method: 'POST',
     body: { endpoint },
   }),
+
+  // 지금 본 데까지 읽음 처리 (채널 배지 지우기)
+  markRead: (channelId) => call('/channels/read', {
+    method: 'POST',
+    body: { channel_id: channelId },
+  }),
 };

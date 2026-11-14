@@ -83,9 +83,9 @@ function ensureSchema(sql: Sql): Promise<void> {
       const t0 = Date.now();
       let fresh = false;
       try {
-        const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean }[];
+        const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean; reads?: boolean }[];
         const t = rows?.[0] ?? {};
-        fresh = !(t.members && t.channels && t.messages && t.push && t.push_config);
+        fresh = !(t.members && t.channels && t.messages && t.push && t.push_config && t.reads);
       } catch (e) {
         fresh = true;
         console.error(FN, 'check tables', (e as Error)?.message ?? e);
@@ -99,9 +99,9 @@ function ensureSchema(sql: Sql): Promise<void> {
       }
       try { await sql.unsafe(SEED_CHANNELS); } catch (e) { console.error(FN, 'seed', (e as Error)?.message ?? e); }
       // 마지막 확인: 핵심 표가 정말 있는지 (하나라도 없으면 이번 요청은 실패로 알린다)
-      const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean }[];
+      const rows = await sql.unsafe(CHECK_TABLES) as unknown as { members?: boolean; channels?: boolean; messages?: boolean; push?: boolean; push_config?: boolean; reads?: boolean }[];
       const t = rows?.[0] ?? {};
-      if (!(t.members && t.channels && t.messages && t.push && t.push_config)) throw new Error('표를 만들지 못했습니다');
+      if (!(t.members && t.channels && t.messages && t.push && t.push_config && t.reads)) throw new Error('표를 만들지 못했습니다');
       console.log(FN, 'schema ready', Date.now() - t0, 'ms', fresh ? '(created)' : '(existing)');
     })().catch((e) => {
       schemaReady = null; // 다음 요청에서 다시 시도
@@ -121,7 +121,7 @@ function colorFor(seed: string): string {
 }
 
 type Member = { id: string; email: string; name: string; role: 'member' | 'admin'; avatar_color: string; last_seen_at: string | null };
-type Channel = { id: number; slug: string | null; name: string; kind: 'channel' | 'dm' | 'ai'; description: string; dm_key: string | null; created_at: string };
+type Channel = { id: number; slug: string | null; name: string; kind: 'channel' | 'dm' | 'ai'; description: string; dm_key: string | null; created_at: string; unread: number };
 type Message = {
   id: number; channel_id: number; parent_id: number | null; user_id: string | null;
   author_name: string; author_kind: 'user' | 'ai'; content: string; created_at: string; reply_count: number;
@@ -138,6 +138,7 @@ const asChannel = (r: Record<string, unknown>): Channel => ({
   kind: r.kind === 'dm' || r.kind === 'ai' ? r.kind : 'channel',
   description: String(r.description ?? ''), dm_key: r.dm_key == null ? null : String(r.dm_key),
   created_at: String(iso(r.created_at) ?? ''),
+  unread: Number(r.unread_count ?? 0),
 });
 const asMessage = (r: Record<string, unknown>): Message => ({
   id: Number(r.id), channel_id: Number(r.channel_id),
@@ -210,6 +211,22 @@ async function topMessages(sql: Sql, channelId: number): Promise<Message[]> {
     [channelId],
   ) as unknown as Record<string, unknown>[];
   return rows.map(asMessage).reverse();
+}
+
+/** 채널별 안 읽은 메시지 수 + 그 채널의 마지막 메시지 번호 */
+async function unreadFor(sql: Sql, meId: string): Promise<{ channel_id: number; unread: number; last_id: number }[]> {
+  const rows = await sql`select c.id,
+      (select count(*)::int from ${sql(SCHEMA)}.messages m
+        where m.channel_id = c.id and m.id > coalesce(r.last_read_id, 0)
+          and (m.user_id is null or m.user_id <> ${meId})) as unread,
+      coalesce((select max(m2.id) from ${sql(SCHEMA)}.messages m2 where m2.channel_id = c.id), 0) as last_id
+    from ${sql(SCHEMA)}.channels c
+    left join ${sql(SCHEMA)}.channel_reads r on r.channel_id = c.id and r.user_id = ${meId}
+    where c.kind = 'channel'
+       or exists (select 1 from ${sql(SCHEMA)}.channel_members cm where cm.channel_id = c.id and cm.user_id = ${meId})`;
+  return (rows as Record<string, unknown>[]).map((r) => ({
+    channel_id: Number(r.id), unread: Number(r.unread ?? 0), last_id: Number(r.last_id ?? 0),
+  }));
 }
 
 async function threadMessages(sql: Sql, channelId: number, parentId: number): Promise<{ parent: Message; replies: Message[] }> {
@@ -374,8 +391,12 @@ Deno.serve(async (req) => {
       await ensureAiChannel(sql, me);
       const memberRows = await sql`select user_id, email, name, role, avatar_color, last_seen_at
         from ${sql(SCHEMA)}.members order by name asc, email asc limit 300`;
-      const channelRows = await sql`select c.id, c.slug, c.name, c.kind, c.description, c.dm_key, c.created_at
+      const channelRows = await sql`select c.id, c.slug, c.name, c.kind, c.description, c.dm_key, c.created_at,
+          (select count(*)::int from ${sql(SCHEMA)}.messages m
+            where m.channel_id = c.id and m.id > coalesce(r.last_read_id, 0)
+              and (m.user_id is null or m.user_id <> ${me.id})) as unread_count
         from ${sql(SCHEMA)}.channels c
+        left join ${sql(SCHEMA)}.channel_reads r on r.channel_id = c.id and r.user_id = ${me.id}
         where c.kind = 'channel'
            or exists (select 1 from ${sql(SCHEMA)}.channel_members cm where cm.channel_id = c.id and cm.user_id = ${me.id})
         order by case c.kind when 'channel' then 0 when 'ai' then 2 else 1 end, c.id asc`;
@@ -426,6 +447,23 @@ Deno.serve(async (req) => {
       return json(req, 200, { ok: true });
     }
 
+    if (path === '/channels/read' && req.method === 'POST') {
+      const raw = await req.text();
+      if (raw.length > 4096) return json(req, 413, { error: '요청이 너무 큽니다.' });
+      let b: { channel_id?: unknown };
+      try { b = JSON.parse(raw || '{}'); } catch { return json(req, 400, { error: 'JSON 형식이 아닙니다.' }); }
+      const channelId = Number(b.channel_id);
+      if (!Number.isInteger(channelId) || channelId <= 0) return json(req, 400, { error: 'channel_id 가 필요합니다.' });
+      await channelFor(sql, me.id, channelId);
+      const [row] = await sql`select coalesce(max(id), 0) as last_id from ${sql(SCHEMA)}.messages where channel_id = ${channelId}`;
+      const lastId = Number((row as Record<string, unknown> | undefined)?.last_id ?? 0);
+      await sql`insert into ${sql(SCHEMA)}.channel_reads (user_id, channel_id, last_read_id, updated_at)
+        values (${me.id}, ${channelId}, ${lastId}, now())
+        on conflict (user_id, channel_id) do update
+          set last_read_id = greatest(${sql(SCHEMA)}.channel_reads.last_read_id, excluded.last_read_id), updated_at = now()`;
+      return json(req, 200, { ok: true, channel_id: channelId, last_read_id: lastId });
+    }
+
     if (path === '/channels' && req.method === 'POST') {
       const raw = await req.text();
       if (raw.length > 8192) return json(req, 413, { error: '요청이 너무 큽니다.' });
@@ -473,10 +511,10 @@ Deno.serve(async (req) => {
         const parentId = Number(parent);
         if (!Number.isInteger(parentId) || parentId <= 0) return json(req, 400, { error: 'parent_id 가 올바르지 않습니다.' });
         const t = await threadMessages(sql, channelId, parentId);
-        return json(req, 200, { channel_id: channelId, parent: t.parent, messages: t.replies });
+        return json(req, 200, { channel_id: channelId, parent: t.parent, messages: t.replies, unread: await unreadFor(sql, me.id) });
       }
       const messages = await topMessages(sql, channelId);
-      return json(req, 200, { channel_id: channelId, messages });
+      return json(req, 200, { channel_id: channelId, messages, unread: await unreadFor(sql, me.id) });
     }
 
     if (path === '/messages' && req.method === 'POST') {
