@@ -176,6 +176,8 @@ function openLightbox(url, att) {
   $('lightbox-open').href = url;
   const dl = $('lightbox-download');
   dl.href = url;
+  if (att && att.url) dl.download = att.name || '사진';
+  else dl.removeAttribute('download');
   if (att && !att.url) {
     dl.href = '#';
     fileUrl(att, { download: true }).then((u) => { dl.href = u; }).catch(() => { dl.removeAttribute('href'); });
@@ -197,7 +199,7 @@ function attachmentsEl(atts) {
     if (isImage(att.mime)) {
       const btn = el('button', 'att-img');
       btn.type = 'button';
-      btn.title = `${att.name} — 눌러서 크게 보기`;
+      btn.setAttribute('aria-label', `${att.name || '사진'} — 크게 보기`);
       const ph = el('span', 'att-img-ph', '🖼️');
       const img = document.createElement('img');
       img.alt = att.name || '사진';
@@ -218,7 +220,8 @@ function attachmentsEl(atts) {
       const a = el('a', 'att-file');
       a.target = '_blank';
       a.rel = 'noreferrer noopener';
-      a.title = `${att.name} 내려받기`;
+      if (att.url) a.download = att.name || '파일'; // 미리보기(blob 주소)는 새 탭을 못 열어 내려받기로 처리
+      a.setAttribute('aria-label', `${att.name || '파일'} 내려받기 (${formatSize(att.size)})`);
       a.append(el('span', 'att-file-ico', '📄'));
       const meta = el('span', 'att-file-meta');
       meta.appendChild(el('b', 'att-file-name', att.name || '파일'));
