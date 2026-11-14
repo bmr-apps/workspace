@@ -4,6 +4,8 @@ import { applyAppInfo } from './app-info.js';
 import { currentUser, onUserChange, loginWithGoogle, logout } from './auth.js';
 import { liveApi } from './api.js';
 import { previewApi } from './preview.js';
+import { FN_URL } from './supabase.js';
+import { Huddle } from './huddle.js';
 import { renderMarkdown } from './markdown.js';
 import { local } from './store.js';
 import {
@@ -44,6 +46,12 @@ const S = {
   poll: null,
   reloadTimer: null,
   sig: '',
+  tokens: [],
+  newToken: '',
+  huddle: null,
+  huddleChannelId: null,
+  huddleBig: false,
+  huddleCompact: false,
 };
 
 // ---------- 작은 도우미 ----------
@@ -568,6 +576,7 @@ async function reload({ silent = true } = {}) {
 
 async function selectChannel(id) {
   if (!S.channels.some((c) => c.id === id)) return;
+  if (S.huddle && S.huddleChannelId !== id) leaveHuddle('다른 채널로 옮겨서 회의에서 나왔어요.');
   if (S.channelId !== id) { clearPending(false); clearPending(true); }
   S.channelId = id;
   S.threadOpen = false;
@@ -589,6 +598,7 @@ async function selectChannel(id) {
   S.unread[id] = 0;
   renderSidebar();
   updateUnreadUi();
+  updateHuddleButtons();
   await reload({ silent: false });
   markRead(id);
 }
@@ -743,6 +753,304 @@ async function send(inThread) {
   }
 }
 
+// ---------- 연동 열쇠 · MCP (관리자) ----------
+const MCP_URL = FN_URL + '/mcp';
+const tokenFmt = new Intl.DateTimeFormat('ko-KR', { timeZone: TZ, dateStyle: 'short', timeStyle: 'short' });
+const fmtWhen = (v) => (v ? tokenFmt.format(new Date(v)) : '');
+
+/** Cursor · Claude Desktop 에 붙여 넣을 설정 — 새로 발급한 열쇠가 있으면 그 값을 바로 쓴다 */
+function mcpJson(token) {
+  return JSON.stringify({
+    mcpServers: {
+      'byeolmuri-workspace': {
+        url: MCP_URL,
+        headers: { Authorization: `Bearer ${token || '<발급받은 열쇠>'}` },
+      },
+    },
+  }, null, 2);
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function copyAndTell(text, label) {
+  const ok = await copyText(text);
+  toast(ok ? `${label} 복사했어요.` : '복사하지 못했어요. 직접 선택해 복사해 주세요.', ok ? '' : 'err');
+}
+
+function setLinkNote(msg, err = false) {
+  const n = $('link-note');
+  n.textContent = msg || '';
+  n.hidden = !msg;
+  n.classList.toggle('err', Boolean(err));
+}
+
+function renderTokens() {
+  const box = $('token-list');
+  box.textContent = '';
+  const list = S.tokens || [];
+  if (!list.length) {
+    box.appendChild(el('p', 'token-empty', '아직 발급한 열쇠가 없어요. 위에서 하나 발급해 주세요.'));
+    return;
+  }
+  for (const t of list) {
+    const row = el('div', 'token-row' + (t.revoked_at ? ' off' : ''));
+    const main = el('div', 'token-main');
+    main.appendChild(el('b', 'token-name', t.name));
+    main.appendChild(el('code', 'token-prefix', `${t.token_prefix}…`));
+    const meta = el('span', 'token-meta');
+    meta.textContent = [
+      t.created_at ? `발급 ${fmtWhen(t.created_at)}` : '',
+      t.last_used_at ? `마지막 사용 ${fmtWhen(t.last_used_at)}` : '아직 안 씀',
+      t.revoked_at ? `폐기 ${fmtWhen(t.revoked_at)}` : '',
+    ].filter(Boolean).join(' · ');
+    main.appendChild(meta);
+    row.appendChild(main);
+    if (!t.revoked_at) {
+      const b = el('button', 'btn ghost small', '폐기');
+      b.type = 'button';
+      b.addEventListener('click', () => revokeToken(t, b));
+      row.appendChild(b);
+    } else {
+      row.appendChild(el('span', 'token-tag', '폐기됨'));
+    }
+    box.appendChild(row);
+  }
+}
+
+async function loadTokens() {
+  if (!S.api || !S.api.botTokens) return;
+  try {
+    const res = await S.api.botTokens();
+    S.tokens = res.tokens || [];
+    renderTokens();
+    setLinkNote(res.env_token ? '서버 비밀값(WORKSPACE_BOT_TOKEN)으로 넣은 열쇠도 함께 쓰이고 있어요.' : '');
+  } catch (e) {
+    setLinkNote(e.message || '열쇠 목록을 불러오지 못했어요.', true);
+  }
+}
+
+async function issueToken(e) {
+  e.preventDefault();
+  const input = $('token-name');
+  const name = input.value.trim();
+  if (!name) { input.focus(); return; }
+  const btn = $('token-issue');
+  btn.disabled = true;
+  try {
+    const res = await S.api.issueBotToken(name);
+    S.newToken = res.token || '';
+    $('token-value').textContent = S.newToken;
+    $('token-new').hidden = false;
+    $('mcp-json').textContent = mcpJson(S.newToken);
+    input.value = '';
+    await loadTokens();
+    if (S.mode === 'preview') setLinkNote('미리보기예요 — 진짜 열쇠는 만들어지지 않고 어디에도 저장되지 않습니다.');
+    else setLinkNote("열쇠를 발급했어요. 아래 '복사'로 지금 바로 옮겨 두세요.");
+  } catch (err) {
+    setLinkNote(err.message || '열쇠를 발급하지 못했어요.', true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function revokeToken(t, btn) {
+  if (!window.confirm(`«${t.name}» 열쇠를 폐기할까요? 이 열쇠로는 더 이상 읽거나 쓸 수 없습니다.`)) return;
+  btn.disabled = true;
+  try {
+    await S.api.revokeBotToken(t.id);
+    await loadTokens();
+    setLinkNote(`«${t.name}» 열쇠를 폐기했어요.`);
+  } catch (e) {
+    btn.disabled = false;
+    setLinkNote(e.message || '폐기하지 못했어요.', true);
+  }
+}
+
+function openLinkModal() {
+  const box = $('link-modal');
+  if (!box) return;
+  S.newToken = '';
+  $('token-new').hidden = true;
+  $('token-value').textContent = '';
+  $('mcp-url').textContent = MCP_URL;
+  $('mcp-json').textContent = mcpJson('');
+  setLinkNote(S.mode === 'preview' ? '미리보기예요 — 여기서 만든 열쇠는 연습용이고 실제로는 동작하지 않습니다.' : '');
+  box.hidden = false;
+  $('token-name').focus();
+  loadTokens();
+}
+
+function closeLinkModal() {
+  const box = $('link-modal');
+  if (box) box.hidden = true;
+}
+
+// ---------- 음성·화상 회의(허들) ----------
+const huddleTiles = new Map(); // 참가자 id → { el, video }
+
+function huddleAllowed(ch) {
+  return Boolean(ch && (ch.kind === 'channel' || ch.kind === 'dm'));
+}
+
+function updateHuddleButtons() {
+  const ch = currentChannel();
+  const can = huddleAllowed(ch);
+  const inHere = Boolean(S.huddle && S.huddleChannelId === (ch && ch.id));
+  for (const [id, verb] of [['huddle-audio', '음성'], ['huddle-video', '화상']]) {
+    const b = $(id);
+    if (!b) continue;
+    b.hidden = !can;
+    b.classList.toggle('on', inHere);
+    b.setAttribute('aria-pressed', inHere ? 'true' : 'false');
+    b.title = inHere ? `${verb} 회의 중 — 누르면 회의 창을 펼침` : `${verb} 회의 시작`;
+  }
+}
+
+function tileColor(id) {
+  let h = 0;
+  const s = String(id || '');
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
+
+function buildTile(p) {
+  const el2 = el('div', 'hd-tile' + (p.local ? ' me' : ''));
+  el2.setAttribute('role', 'listitem');
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.playsInline = true;
+  video.muted = Boolean(p.local); // 내 소리가 되돌아 들리지 않게
+  video.setAttribute('playsinline', '');
+  const av = el('div', 'hd-av', firstChar(p.name));
+  av.style.background = tileColor(p.id);
+  const bar = el('div', 'hd-bar');
+  const nm = el('span', 'hd-name', p.local ? `${p.name} (나)` : p.name);
+  const mic = el('span', 'hd-mic');
+  const scr = el('span', 'hd-scr', '🖥️');
+  bar.append(nm, mic, scr);
+  el2.append(video, av, bar);
+  return { el: el2, video, av, mic, scr };
+}
+
+function updateTile(tile, p) {
+  const stream = p.video && p.stream ? p.stream : null;
+  if (tile.video.srcObject !== stream) {
+    tile.video.srcObject = stream;
+    if (stream) { const pr = tile.video.play(); if (pr && pr.catch) pr.catch(() => { /* 자동재생 실패는 무시 */ }); }
+  }
+  tile.el.classList.toggle('video-off', !stream);
+  tile.el.classList.toggle('speaking', Boolean(p.speaking));
+  tile.el.classList.toggle('mic-off', !p.micOn);
+  tile.mic.textContent = p.micOn ? '🎙️' : '🔇';
+  tile.scr.hidden = !p.screen;
+}
+
+function renderHuddle() {
+  const box = $('huddle');
+  if (!box) return;
+  const h = S.huddle;
+  if (!h) {
+    box.hidden = true;
+    for (const [, t] of huddleTiles) t.el.remove();
+    huddleTiles.clear();
+    updateHuddleButtons();
+    return;
+  }
+  box.hidden = false;
+  box.classList.toggle('compact', S.huddleCompact);
+  box.classList.toggle('big', S.huddleBig);
+
+  const ch = S.channels.find((c) => c.id === S.huddleChannelId) || null;
+  $('huddle-title').textContent = ch ? (ch.kind === 'channel' ? '#' + ch.name : ch.name) : '';
+  const people = h.view();
+  $('huddle-count').textContent = `${people.length}명`;
+
+  const wrap = $('huddle-tiles');
+  const seen = new Set();
+  for (const p of people) {
+    const key = String(p.id);
+    seen.add(key);
+    let tile = huddleTiles.get(key);
+    if (!tile) { tile = buildTile(p); huddleTiles.set(key, tile); wrap.appendChild(tile.el); }
+    updateTile(tile, p);
+  }
+  for (const [id, t] of [...huddleTiles]) if (!seen.has(id)) { t.el.remove(); huddleTiles.delete(id); }
+
+  const l = h.local;
+  const micBtn = $('huddle-mic');
+  micBtn.classList.toggle('off', !l.micOn);
+  micBtn.setAttribute('aria-pressed', l.micOn ? 'true' : 'false');
+  micBtn.querySelector('span').textContent = l.micOn ? '마이크' : '마이크 꺼짐';
+  const camBtn = $('huddle-cam');
+  camBtn.classList.toggle('off', !l.camOn);
+  camBtn.setAttribute('aria-pressed', l.camOn ? 'true' : 'false');
+  camBtn.querySelector('span').textContent = l.camOn ? '카메라' : '카메라 꺼짐';
+  const scrBtn = $('huddle-screen');
+  scrBtn.classList.toggle('on', l.screenOn);
+  scrBtn.setAttribute('aria-pressed', l.screenOn ? 'true' : 'false');
+  scrBtn.querySelector('span').textContent = l.screenOn ? '공유 중' : '화면';
+  $('huddle-collapse').querySelector('span').textContent = S.huddleCompact ? '펼치기' : '접기';
+  $('huddle-big').textContent = S.huddleBig ? '작게 보기' : '크게 보기';
+  $('huddle-big').setAttribute('aria-pressed', S.huddleBig ? 'true' : 'false');
+  const note = $('huddle-note');
+  if (note) {
+    const text = S.mode === 'preview' ? '미리보기예요 — 실제 마이크·카메라 없이 화면만 연습합니다.' : '';
+    note.textContent = text;
+    note.hidden = !text;
+  }
+  updateHuddleButtons();
+}
+
+async function startHuddle(video) {
+  const ch = currentChannel();
+  if (!huddleAllowed(ch)) return;
+  if (S.huddle) { S.huddleBig = false; S.huddleCompact = false; renderHuddle(); return; }
+  S.huddleChannelId = ch.id;
+  S.huddleBig = false;
+  S.huddleCompact = false;
+  const h = new Huddle({
+    channelId: ch.id,
+    me: { id: S.me.id, name: S.me.name },
+    preview: S.mode === 'preview',
+    onChange: () => renderHuddle(),
+    onNotice: (m) => toast(m),
+  });
+  S.huddle = h;
+  renderHuddle();
+  try {
+    await h.join({ video });
+  } catch (e) {
+    toast(e.message || '회의에 들어가지 못했어요.', 'err');
+    leaveHuddle();
+  }
+}
+
+function leaveHuddle(msg = '') {
+  const h = S.huddle;
+  S.huddle = null;
+  S.huddleChannelId = null;
+  S.huddleBig = false;
+  S.huddleCompact = false;
+  renderHuddle();
+  if (h) h.leave().catch(() => { /* 나가기는 실패해도 그만 */ });
+  if (msg) toast(msg);
+}
+
 // ---------- 화면 전환 ----------
 function showBoot() {
   $('boot').hidden = false;
@@ -767,10 +1075,13 @@ function showLogin(msg = '', isErr = false) {
   $('conn').hidden = true;
   $('open-sidebar').hidden = true;
   $('bell').hidden = true;
+  $('link-admin').hidden = true;
+  closeLinkModal();
   $('login-logout').hidden = !S.hasSession;
 }
 
 function teardown() {
+  leaveHuddle();
   if (S.unsub) { try { S.unsub(); } catch { /* 무시 */ } S.unsub = null; }
   if (S.poll) { clearInterval(S.poll); S.poll = null; }
   if (S.reloadTimer) { clearTimeout(S.reloadTimer); S.reloadTimer = null; }
@@ -796,6 +1107,9 @@ function teardown() {
   S.sig = '';
   S.hasSession = false;
   S.unread = {};
+  S.tokens = [];
+  S.newToken = '';
+  closeLinkModal();
   updateUnreadUi();
 }
 
@@ -815,6 +1129,7 @@ function enter(data, mode) {
   $('logout').hidden = false;
   $('open-sidebar').hidden = false;
   $('bell').hidden = mode !== 'live';
+  $('link-admin').hidden = !(S.me && S.me.role === 'admin');
   if (mode === 'live') refreshBell();
   $('logout').textContent = mode === 'preview' && !narrowScreen() ? '미리보기 끝내기' : (mode === 'preview' ? '나가기' : '로그아웃');
   $('conn').hidden = false;
@@ -1029,6 +1344,35 @@ function bind() {
   $('backdrop').addEventListener('click', closeSidebar);
   $('close-thread').addEventListener('click', closeThread);
 
+  // ---------- 연동 열쇠 · MCP 창 ----------
+  $('link-admin').addEventListener('click', openLinkModal);
+  $('link-close').addEventListener('click', closeLinkModal);
+  $('link-modal').addEventListener('click', (e) => { if (e.target === $('link-modal')) closeLinkModal(); });
+  $('token-form').addEventListener('submit', issueToken);
+  $('token-copy').addEventListener('click', () => copyAndTell(S.newToken, '열쇠를'));
+  $('mcp-url-copy').addEventListener('click', () => copyAndTell(MCP_URL, 'MCP 서버 주소를'));
+  $('mcp-json-copy').addEventListener('click', () => copyAndTell(mcpJson(S.newToken), 'MCP 설정을'));
+
+  // ---------- 음성·화상 회의(허들) ----------
+  $('huddle-audio').addEventListener('click', () => startHuddle(false));
+  $('huddle-video').addEventListener('click', () => startHuddle(true));
+  $('huddle-leave').addEventListener('click', () => leaveHuddle('회의에서 나왔어요.'));
+  $('huddle-leave2').addEventListener('click', () => leaveHuddle('회의에서 나왔어요.'));
+  $('huddle-mic').addEventListener('click', () => { if (S.huddle) S.huddle.toggleMic(); });
+  $('huddle-cam').addEventListener('click', () => { if (S.huddle) S.huddle.toggleCam(); });
+  $('huddle-screen').addEventListener('click', () => { if (S.huddle) S.huddle.toggleScreen(); });
+  $('huddle-collapse').addEventListener('click', () => {
+    S.huddleCompact = !S.huddleCompact;
+    if (S.huddleCompact) S.huddleBig = false;
+    renderHuddle();
+  });
+  $('huddle-big').addEventListener('click', () => {
+    S.huddleBig = !S.huddleBig;
+    if (S.huddleBig) S.huddleCompact = false;
+    renderHuddle();
+  });
+  window.addEventListener('beforeunload', () => { if (S.huddle) S.huddle.leave(); });
+
   $('new-channel').addEventListener('click', () => {
     const form = $('new-channel-form');
     form.hidden = false;
@@ -1142,7 +1486,8 @@ function bind() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('lightbox').hidden) closeLightbox();
+    if (!$('link-modal').hidden) closeLinkModal();
+    else if (!$('lightbox').hidden) closeLightbox();
     else if (S.threadOpen) closeThread();
     else if ($('sidebar').classList.contains('open')) closeSidebar();
   });

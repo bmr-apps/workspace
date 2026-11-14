@@ -7,6 +7,8 @@
 - **채널** — `#일반`, `#수업-나눔`, `#AI-라운지` 와 직접 만드는 채널. 메시지마다 **스레드**로 답글을 모읍니다.
 - **다이렉트 메시지** — 선생님과 1:1 대화.
 - **Alter(AI)** — `🤖 Alter (AI)` 방은 나만의 AI 방이고, 어느 채널에서든 메시지에 `@AI` 를 부르면 그 메시지의 스레드에 답글이 달립니다.
+- **음성·화상 회의(허들)** — 채널·DM 상단의 `🎙️ 음성` / `📹 화상` 으로 들어갑니다. 화면끼리 P2P(WebRTC)로 연결되고, 신호만 Supabase Realtime(broadcast·presence)을 씁니다.
+- **봇 API · MCP** — 관리자가 화면 오른쪽 위 `🔑 연동` 에서 열쇠를 발급하면 Alter(피클)·Cursor 같은 도구가 REST API 와 표준 MCP(`/mcp`)로 **공개 채널**을 읽고 글을 쓸 수 있습니다 (DM·AI 방은 열리지 않습니다).
 - 로그인은 BMR APPS 공용 구글 계정입니다. `@bmrschool.org` · `@bmrschool.net` 메일은 처음 로그인할 때 멤버로 자동 등록되고, **맨 처음 로그인한 사람이 관리자**가 됩니다. 그 밖의 계정은 관리자가 `workspace.members` 에 넣어 주어야 들어올 수 있습니다.
 - **미리보기로 둘러보기** 버튼은 서버 없이 화면을 연습하는 모드입니다(가짜 데이터·예시 Alter 답변, 저장 안 됨).
 
@@ -408,6 +410,44 @@ push 할 때마다 GitHub Actions 의 **'공용 주소 점검'** (`.github/workf
 - 일부러 그렇게 쓴 줄은 그 줄 끝이나 바로 윗줄에 **`// bmr-allow: 이유`** 를 달면 건너뜁니다.
 - 결과는 GitHub 가 서명한 1회용 토큰(OIDC)으로만 허브에 보내므로 저장소에 비밀값이 없습니다.
 - `.bmr-check.json` 의 `"block_dangerous": true` 로 바꾸면 `clear()`·범위 없는 서비스 워커 두 규칙은 실패로 막습니다(지금은 꺼 둠).
+
+## 봇 API · MCP · 음성·화상 회의(허들)
+
+### 봇 API · MCP
+
+관리자가 화면 오른쪽 위 **`🔑 연동`** 을 눌러 열쇠(`bmrws_…`)를 발급합니다. 열쇠 원문은 그 순간 한 번만 보이고, 서버에는 SHA-256 해시만 남습니다(`workspace.bot_tokens`).
+
+| 방식 | 주소 | 하는 일 |
+|---|---|---|
+| REST | `GET /bot/channels` | 공개 채널 목록 |
+| REST | `GET /bot/messages?channel_id=…` (또는 `slug=…`, `parent_id`, `since_id`, `limit`) | 메시지·스레드 읽기 |
+| REST | `POST /bot/messages` `{channel_id\|slug, content, parent_id?, author_name?}` | 메시지·답글 쓰기 (+ Web Push 알림) |
+| REST | `GET /bot/search?q=…` | 채널 메시지 검색 |
+| MCP | `POST /mcp` | JSON-RPC 2.0 — `initialize` · `tools/list` · `tools/call` (`list_channels`, `read_messages`, `send_message`, `search_messages`) |
+
+열쇠는 `Authorization: Bearer bmrws_…` 또는 `x-bot-token` 헤더로 보냅니다. 서버 함수 비밀값 **`WORKSPACE_BOT_TOKEN`** 을 넣어 두면 그 값도 열쇠로 쓸 수 있습니다.
+
+```bash
+curl -s https://psupfmarnyxontorftio.supabase.co/functions/v1/workspace-fn/bot/channels \
+  -H "Authorization: Bearer bmrws_발급받은열쇠"
+```
+
+```json
+{ "mcpServers": { "byeolmuri-workspace": {
+  "url": "https://psupfmarnyxontorftio.supabase.co/functions/v1/workspace-fn/mcp",
+  "headers": { "Authorization": "Bearer bmrws_발급받은열쇠" } } } }
+```
+
+**지키는 선** — 봇·MCP 는 `kind = 'channel'` 인 공개 채널만 봅니다. 1:1 DM 과 개인 AI 방은 어떤 열쇠로도 열리지 않습니다. 열쇠는 관리자만 발급·폐기합니다.
+
+### 음성·화상 회의 (허들)
+
+- 채널·DM 상단의 **`🎙️ 음성`** / **`📹 화상`** 으로 들어갑니다 (AI 방에는 없습니다). 들어가면 대화 목록 위에 회의 창이 붙어서, 회의하면서 글·사진도 그대로 주고받을 수 있습니다.
+- 구조: `src/huddle.js`. 신호(SDP·ICE)는 Supabase Realtime 의 **presence + broadcast**(`workspace-huddle:<채널 id>`)로, 소리·영상은 **P2P mesh** 로 오갑니다. 서버 함수·DB 저장이 없습니다.
+- 부딪힘(glare) 방지: `user_id` 문자열을 비교해 **작은 쪽만 offer** 를 냅니다.
+- 마이크·카메라가 없거나 권한이 거부되면 **듣기만** 으로 들어가고 안내가 뜹니다(중간에 켜면 다시 붙습니다). 화면 공유·카메라 전환은 `replaceTrack` 으로 처리해 협상을 다시 하지 않습니다.
+- STUN 만 씁니다. 사내망처럼 STUN 으로도 붙지 않는 곳에서는 TURN 서버가 따로 필요합니다.
+- 미리보기 모드에서는 가짜 참가자·가짜 화면으로 UI 만 연습합니다(권한 창이 뜨지 않습니다).
 
 ## 폴더
 

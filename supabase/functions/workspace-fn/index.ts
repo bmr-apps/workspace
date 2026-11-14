@@ -8,6 +8,11 @@
 //   GET  /messages?channel_id=…[&parent_id=…]     채널 메시지 / 스레드 답글 (attachments 포함)
 //   POST /messages      {channel_id, content, parent_id?, attachments?}  메시지 쓰기 (+ @AI 면 Alter 답글)
 //
+// 봇 연동 (자세한 것은 bot.ts):
+//   GET  /bot/channels · GET|POST /bot/messages · GET /bot/search   (열쇠: Authorization: Bearer bmrws_…)
+//   POST /mcp   표준 MCP(Streamable HTTP) — Alter·Cursor 같은 도구가 공개 채널을 읽고 쓴다
+//   GET|POST /bot/tokens, /bot/tokens/revoke, DELETE /bot/tokens/:id   관리자 화면의 열쇠 발급·폐기
+//
 // 사진·파일: 브라우저가 Storage 버킷 'workspace' 의 <내 아이디>/… 에 직접 올리고,
 // 이 함수에는 [{path,name,mime,size}] 만 받아 messages.attachments 에 적습니다.
 // 볼 때는 브라우저가 createSignedUrl 로 1시간짜리 주소를 만들어 씁니다(로그인한 사람은 이 버킷을 읽을 수 있음).
@@ -19,11 +24,23 @@ import postgres from 'npm:postgres@3.4.5';
 import { DDL, SEED_CHANNELS, CHECK_TABLES } from './schema.ts';
 import { ask, hasKey as aiHasKey, currentModel, lastAiResult, type Turn } from './ai.ts';
 import { getVapid, pushAvailable, sendPush } from './push.ts';
+import {
+  botApi, mcpApi, requireBotToken, listBotTokens, createBotToken, revokeBotToken, BotError,
+  type Notify, type Reply,
+} from './bot.ts';
 
 const FN = 'workspace-fn';
 const SCHEMA = 'workspace';
 const PREFIX = 'WORKSPACE_';
 const ORIGINS = ['https://apps.bmrschool.net', 'http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:4173', 'http://127.0.0.1:4173'];
+// 봇 API·MCP 는 화면이 아니라 바깥 도구(서버·데스크톱 앱)가 부른다 — 출처를 가리지 않고 열쇠로만 가린다
+const OPEN_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-bot-token, content-type, accept, mcp-session-id, mcp-protocol-version',
+  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+  'Access-Control-Max-Age': '600',
+  'Access-Control-Expose-Headers': 'mcp-session-id, mcp-protocol-version',
+};
 
 const secret = (name: string) => Deno.env.get(PREFIX + name) ?? '';
 const DB_URL = secret('DB_URL');
@@ -36,7 +53,7 @@ function cors(req: Request): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': ORIGINS.includes(o) ? o : ORIGINS[0],
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Max-Age': '600', Vary: 'Origin',
   };
 }
@@ -44,6 +61,16 @@ const json = (req: Request, status: number, body: unknown) =>
   new Response(JSON.stringify(body), {
     status,
     headers: { ...cors(req), 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+  });
+
+/** 봇·MCP 응답 — 열려 있는 CORS 머리글을 그대로 쓰고 본문만 싣는다 */
+const jsonOpen = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+  new Response(body == null ? null : JSON.stringify(body), {
+    status,
+    headers: {
+      ...OPEN_HEADERS, 'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers,
+    },
   });
 
 class HttpError extends Error {
@@ -84,12 +111,14 @@ let schemaReady: Promise<void> | null = null;
 type TableFlags = {
   members?: boolean; channels?: boolean; messages?: boolean; push?: boolean;
   push_config?: boolean; reads?: boolean; attachments?: boolean; attach_ok?: boolean; body_check?: boolean;
+  bot_tokens?: boolean;
 };
 /** 표·칸·첨부 조건이 다 준비됐는가 (하나라도 빠지면 DDL 을 다시 건다) */
 const coreOk = (t: TableFlags) =>
   Boolean(t.members && t.channels && t.messages && t.push && t.push_config && t.reads);
 const attachOk = (t: TableFlags) => Boolean(t.attachments && t.attach_ok && t.body_check);
-const schemaOk = (t: TableFlags) => coreOk(t) && attachOk(t);
+const botOk = (t: TableFlags) => Boolean(t.bot_tokens);
+const schemaOk = (t: TableFlags) => coreOk(t) && attachOk(t) && botOk(t);
 function ensureSchema(sql: Sql): Promise<void> {
   if (!schemaReady) {
     schemaReady = (async () => {
@@ -116,6 +145,8 @@ function ensureSchema(sql: Sql): Promise<void> {
       if (!coreOk(t)) throw new Error('표를 만들지 못했습니다');
       // 첨부 조건이 아직 안 맞아도 글 메시지는 그대로 쓸 수 있게 한다 (health 에 attach_ok 로 보임)
       if (!attachOk(t)) console.error(FN, 'attachments not ready', JSON.stringify(t));
+      // 봇·MCP 열쇠 표가 없으면 연동 기능만 쉰다 (나머지 화면은 그대로)
+      if (!botOk(t)) console.error(FN, 'bot tokens not ready', JSON.stringify(t));
       console.log(FN, 'schema ready', Date.now() - t0, 'ms', fresh ? '(created)' : '(existing)');
     })().catch((e) => {
       schemaReady = null; // 다음 요청에서 다시 시도
@@ -427,10 +458,12 @@ const route = (req: Request) => {
 };
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(req) });
-  const o = req.headers.get('Origin');
-  if (o && !ORIGINS.includes(o)) return json(req, 403, { error: '허용되지 않은 출처입니다.' });
   const path = route(req);
+  // 봇 API·MCP 는 화면이 아니라 바깥 도구가 부르므로 출처를 가리지 않는다 (열쇠로만 가린다)
+  const openPath = path === '/mcp' || (path.startsWith('/bot/') && !path.startsWith('/bot/tokens'));
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: openPath ? OPEN_HEADERS : cors(req) });
+  const o = req.headers.get('Origin');
+  if (o && !ORIGINS.includes(o) && !openPath) return json(req, 403, { error: '허용되지 않은 출처입니다.' });
   const sql = db;
   try {
     if (path === '/health') {
@@ -454,7 +487,15 @@ Deno.serve(async (req) => {
       } catch (e) {
         console.error(FN, 'schema', (e as Error)?.message ?? e);
       }
-      return json(req, 200, { ok: true, db: true, schema, ...(counts || {}), ai_last: lastAiResult(), push: pushAvailable(), function: FN });
+      let bot: { tokens: number; env_token: boolean } | null = null;
+      try {
+        const [r] = await sql.unsafe(`select count(*)::int as n from workspace.bot_tokens where revoked_at is null`) as unknown as { n: number }[];
+        bot = { tokens: Number(r?.n ?? 0), env_token: Boolean(secret('BOT_TOKEN')) };
+      } catch { bot = null; }
+      return json(req, 200, {
+        ok: true, db: true, schema, ...(counts || {}), ai_last: lastAiResult(), push: pushAvailable(),
+        mcp: true, bot_api: true, bot, function: FN,
+      });
     }
 
     const user = await getUser(req);
@@ -466,6 +507,83 @@ Deno.serve(async (req) => {
     }
     if (!sql) return json(req, 503, { error: '서버 설정이 아직 끝나지 않았습니다 (DB 연결 정보 없음).' });
     await ensureSchema(sql);
+
+    // ---------- 연동 열쇠 발급·목록·폐기 (이 앱 관리자만) ----------
+    if (path === '/bot/tokens' || path.startsWith('/bot/tokens/')) {
+      if (!user) return json(req, 401, { error: '로그인이 필요합니다. 다시 로그인해 주세요.' });
+      const admin = await memberFor(sql, user);
+      if (admin.role !== 'admin') return json(req, 403, { error: '관리자만 연동 열쇠를 다룰 수 있어요.' });
+      const envTokenSet = Boolean(secret('BOT_TOKEN'));
+
+      if (path === '/bot/tokens' && req.method === 'GET') {
+        return json(req, 200, { tokens: await listBotTokens(sql), env_token: envTokenSet });
+      }
+
+      if (path === '/bot/tokens' && req.method === 'POST') {
+        const raw = await req.text();
+        if (raw.length > 4096) return json(req, 413, { error: '요청이 너무 큽니다.' });
+        let b: { name?: unknown };
+        try { b = JSON.parse(raw || '{}'); } catch { return json(req, 400, { error: 'JSON 형식이 아닙니다.' }); }
+        const name = String(b.name ?? '').replace(/[\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+        if (!name) return json(req, 400, { error: '열쇠 이름을 적어 주세요.' });
+        try {
+          return json(req, 201, await createBotToken(sql, name, admin.id));
+        } catch (e) {
+          if (e instanceof BotError) return json(req, e.status, { error: e.message });
+          throw e;
+        }
+      }
+
+      // 폐기: DELETE /bot/tokens/:id  또는  POST /bot/tokens/revoke {id}
+      const byPath = /^\/bot\/tokens\/(\d{1,19})$/.exec(path);
+      if (byPath && (req.method === 'DELETE' || req.method === 'POST')) {
+        try {
+          return json(req, 200, { ok: true, ...(await revokeBotToken(sql, Number(byPath[1]))) });
+        } catch (e) {
+          if (e instanceof BotError) return json(req, e.status, { error: e.message });
+          throw e;
+        }
+      }
+      if (path === '/bot/tokens/revoke' && req.method === 'POST') {
+        const raw = await req.text();
+        if (raw.length > 4096) return json(req, 413, { error: '요청이 너무 큽니다.' });
+        let b: { id?: unknown };
+        try { b = JSON.parse(raw || '{}'); } catch { return json(req, 400, { error: 'JSON 형식이 아닙니다.' }); }
+        const id = Number(b.id);
+        if (!Number.isInteger(id) || id <= 0) return json(req, 400, { error: '열쇠 번호(id)가 필요합니다.' });
+        try {
+          return json(req, 200, { ok: true, ...(await revokeBotToken(sql, id)) });
+        } catch (e) {
+          if (e instanceof BotError) return json(req, e.status, { error: e.message });
+          throw e;
+        }
+      }
+
+      return json(req, 404, { error: '없는 경로입니다.' });
+    }
+
+    // ---------- 봇 API · MCP (열쇠로 확인) ----------
+    if (openPath) {
+      const auth = await requireBotToken(req, sql, secret('BOT_TOKEN'));
+      if (!auth.ok) {
+        const message = '봇 열쇠가 필요합니다. Authorization: Bearer bmrws_… (또는 x-bot-token) 헤더를 붙여 주세요.';
+        if (path === '/mcp') {
+          return jsonOpen(401, { jsonrpc: '2.0', id: null, error: { code: -32001, message } }, { 'WWW-Authenticate': 'Bearer' });
+        }
+        return jsonOpen(401, { error: message, code: 'bot_unauthorized' });
+      }
+      const notifyBot: Notify = (ch, m) => bg(notifyPush(sql as Sql, ch, m));
+      try {
+        const r: Reply = path === '/mcp'
+          ? await mcpApi(sql, req, notifyBot, OPEN_HEADERS)
+          : await botApi(sql, req, path, notifyBot);
+        return jsonOpen(r.status, r.body, r.headers ?? {});
+      } catch (e) {
+        if (e instanceof BotError) return jsonOpen(e.status, { error: e.message, code: 'bot_error' });
+        console.error(FN, 'bot', (e as { code?: string })?.code ?? '', (e as Error)?.message ?? e);
+        return jsonOpen(500, { error: '서버 오류가 났습니다. 잠시 뒤 다시 시도해 주세요.', code: 'bot_error' });
+      }
+    }
 
     // 여기부터는 로그인 + 이 앱 멤버만
     if (!user) return json(req, 401, { error: '로그인이 필요합니다. 다시 로그인해 주세요.' });

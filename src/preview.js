@@ -8,7 +8,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let seq = 1000;
 
 const ME = {
-  id: 'u-me', email: 'preview@bmrschool.net', name: '나 (미리보기)', role: 'member',
+  // 미리보기에서는 관리자로 둔다 — 새로 만든 🔑 연동 창을 그대로 둘러볼 수 있게 (실제 열쇠는 만들지 않음)
+  id: 'u-me', email: 'preview@bmrschool.net', name: '나 (미리보기)', role: 'admin',
   avatar_color: '#ffdc1a', last_seen_at: iso(Date.now()),
 };
 const MEMBERS = [
@@ -57,10 +58,15 @@ function seedMessages() {
 
 let db = null;
 let unreadState = {};
+let tokenState = [];
 function reset() {
   db = { channels: CHANNELS.map((c) => ({ ...c })), messages: seedMessages() };
   // 연습용 안 읽은 배지 (2번 #수업-나눔 2개, 5번 김하늘 DM 1개)
   unreadState = { 2: 2, 5: 1 };
+  tokenState = [{
+    id: 1, name: '피클 (Alter)', token_prefix: 'bmrws_Pr3v1w',
+    created_at: iso(Date.now() - 6 * 60 * MIN), last_used_at: iso(Date.now() - 2 * MIN), revoked_at: null,
+  }];
 }
 
 function unreadList() {
@@ -248,6 +254,31 @@ export const previewApi = {
 
   // 미리보기는 실시간 구독이 없습니다 (5초 폴링도 필요 없음)
   subscribe() { return () => {}; },
+
+  // ---------- 연동 열쇠 (미리보기: 실제로는 만들지 않고 모양만) ----------
+  async botTokens() {
+    return { tokens: tokenState.map((t) => ({ ...t })), env_token: false, preview: true };
+  },
+
+  async issueBotToken(name) {
+    const clean = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    if (!clean) throw new Error('열쇠 이름을 적어 주세요.');
+    const token = 'bmrws_preview_' + Math.random().toString(36).slice(2, 12);
+    const row = {
+      id: ++seq, name: clean, token_prefix: token.slice(0, 12),
+      created_at: iso(Date.now()), last_used_at: null, revoked_at: null,
+    };
+    tokenState.unshift(row);
+    return { ...row, token, preview: true };
+  },
+
+  async revokeBotToken(id) {
+    const row = tokenState.find((t) => t.id === Number(id));
+    if (!row) throw new Error('없는 열쇠입니다.');
+    if (row.revoked_at) throw new Error('이미 폐기된 열쇠입니다.');
+    row.revoked_at = iso(Date.now());
+    return { ok: true, id: row.id, revoked_at: row.revoked_at };
+  },
 
   reset,
 };

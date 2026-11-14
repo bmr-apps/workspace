@@ -153,6 +153,23 @@ export const DDL: string[] = [
   )`,
   `alter table workspace.channel_reads enable row level security`,
 
+  // ---------- 봇 API · MCP 연동 열쇠 — 함수만 읽고 쓴다 (브라우저에는 권한 없음) ----------
+  // Alter(피클)·Cursor 같은 도구가 공개 채널을 읽고 쓰는 열쇠. 원문은 저장하지 않고 SHA-256 해시만 둔다.
+  `create table if not exists workspace.bot_tokens (
+    id bigint generated always as identity primary key,
+    name text not null check (char_length(name) between 1 and 60),
+    token_prefix text not null check (char_length(token_prefix) between 4 and 40),
+    token_hash text unique not null check (char_length(token_hash) = 64),
+    created_by uuid not null,
+    created_at timestamptz not null default now(),
+    last_used_at timestamptz,
+    revoked_at timestamptz
+  )`,
+  `create index if not exists bot_tokens_hash_idx on workspace.bot_tokens (token_hash)`,
+  `comment on table workspace.bot_tokens is '봇 API·MCP 연동 열쇠. 원문은 저장하지 않고 SHA-256 해시(token_hash)만 둡니다. 폐기는 revoked_at 을 채웁니다.'`,
+  `alter table workspace.bot_tokens enable row level security`,
+  `revoke all on workspace.bot_tokens from anon, authenticated`,
+
   // 실시간 구독용 (프로젝트 설정에 따라 권한이 없을 수 있음 — 실패해도 앱은 폴링으로 동작)
   `do $$ begin
      alter publication supabase_realtime add table workspace.messages;
@@ -184,4 +201,5 @@ export const CHECK_TABLES = `select
        and pg_get_constraintdef(oid) like '%char_length(content)%'
        and pg_get_constraintdef(oid) like '%>= 1%') as attach_ok,
   exists (select 1 from pg_constraint
-     where conrelid = 'workspace.messages'::regclass and conname = 'messages_body_check') as body_check`;
+     where conrelid = 'workspace.messages'::regclass and conname = 'messages_body_check') as body_check,
+  to_regclass('workspace.bot_tokens') is not null as bot_tokens`;

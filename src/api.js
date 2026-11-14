@@ -92,4 +92,14 @@ export const liveApi = {
     method: 'POST',
     body: { channel_id: channelId },
   }),
+
+  // ---------- 연동 열쇠 (관리자만) ----------
+  botTokens: () => call('/bot/tokens'),
+
+  issueBotToken: (name) => call('/bot/tokens', {
+    method: 'POST',
+    body: { name },
+  }),
+
+  revokeBotToken: (id) => call(`/bot/tokens/${q(id)}`, { method: 'DELETE' }),
 };
