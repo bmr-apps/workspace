@@ -497,6 +497,7 @@ function showLogin(msg = '', isErr = false) {
   $('who').hidden = true;
   $('logout').hidden = true;
   $('conn').hidden = true;
+  $('open-sidebar').hidden = true;
   $('login-logout').hidden = !S.hasSession;
 }
 
@@ -535,6 +536,7 @@ function enter(data, mode) {
   $('login').hidden = true;
   $('workspace').hidden = false;
   $('logout').hidden = false;
+  $('open-sidebar').hidden = false;
   $('logout').textContent = mode === 'preview' ? '미리보기 끝내기' : '로그아웃';
   $('conn').hidden = false;
   $('conn').classList.toggle('preview', mode === 'preview');

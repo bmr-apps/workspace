@@ -76,8 +76,9 @@ a { color: inherit; }
 @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
 
 /* ---------- 로그인 ---------- */
-.login { flex: 1; overflow-y: auto; display: flex; flex-direction: column; justify-content: center; padding: 28px 20px 36px; }
-.hero { width: 100%; max-width: 1040px; margin: 0 auto; display: grid; grid-template-columns: 1.1fr 1fr; border: var(--border); box-shadow: var(--hard); }
+/* 로그인: 화면이 짧으면 위아래로 잘리지 않고 스크롤되도록 (가운데 정렬은 margin: auto 로) */
+.login { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; padding: 20px 16px 28px; }
+.hero { width: 100%; max-width: 1040px; margin: auto; flex: none; display: grid; grid-template-columns: 1.1fr 1fr; border: var(--border); box-shadow: var(--hard); }
 .hero-copy { background: var(--cyan); padding: 42px 36px; display: flex; flex-direction: column; gap: 14px; border-right: var(--border); }
 .eyebrow { font-size: 12.5px; font-weight: 900; letter-spacing: .08em; }
 .hero h1 { margin: 0; font-size: 46px; line-height: 1.08; font-weight: 900; letter-spacing: -0.04em; }
@@ -94,7 +95,7 @@ a { color: inherit; }
 .hero-form .tiny { margin: 2px 0 0; font-size: 12px; color: var(--soft); line-height: 1.5; }
 .login-msg { margin: 4px 0 0; padding: 9px 12px; border: var(--border); border-left-width: 8px; border-left-color: var(--yellow); background: var(--yellow-light); font-size: 13px; font-weight: 650; }
 .login-msg.err { border-left-color: var(--coral); background: var(--coral-light); }
-.login-foot { max-width: 1040px; width: 100%; margin: 14px auto 0; display: flex; flex-wrap: wrap; gap: 8px 18px; justify-content: space-between; font-size: 12px; font-weight: 700; color: var(--muted); }
+.login-foot { max-width: 1040px; width: 100%; margin: 14px auto 0; flex: none; display: flex; flex-wrap: wrap; gap: 8px 18px; justify-content: space-between; font-size: 12px; font-weight: 700; color: var(--muted); }
 .login-foot p { margin: 0; }
 .login-foot a { text-decoration-thickness: 2px; text-underline-offset: 2px; }
 
