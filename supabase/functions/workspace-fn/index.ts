@@ -460,7 +460,7 @@ Deno.serve(async (req) => {
       await sql`insert into ${sql(SCHEMA)}.channel_reads (user_id, channel_id, last_read_id, updated_at)
         values (${me.id}, ${channelId}, ${lastId}, now())
         on conflict (user_id, channel_id) do update
-          set last_read_id = greatest(${sql(SCHEMA)}.channel_reads.last_read_id, excluded.last_read_id), updated_at = now()`;
+          set last_read_id = greatest(channel_reads.last_read_id, excluded.last_read_id), updated_at = now()`;
       return json(req, 200, { ok: true, channel_id: channelId, last_read_id: lastId });
     }
 
